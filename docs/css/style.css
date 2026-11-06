@@ -93,3 +93,28 @@ svg .axis { stroke: var(--line); }
 .heat td { text-align: center; font-variant-numeric: tabular-nums; }
 .foot { color: var(--ink3); font-size: 12.5px; padding: 28px 16px 40px; }
 .empty { text-align: center; color: var(--ink3); padding: 28px 0; }
+
+/* ---- review funnel, verdicts, method steps */
+.card.accent { border-color: color-mix(in srgb, var(--flag) 45%, var(--line)); }
+.card.accent .v { color: var(--flag); }
+.badge.ok { background: var(--grid); color: var(--ink2); font-weight: 500; }
+.legend i.ring { background: transparent; border: 1.6px solid var(--ink2); width: 8px; height: 8px; }
+.funnel { display: grid; gap: 10px; margin-top: 6px; }
+.fr { display: grid; grid-template-columns: minmax(150px, 34%) 1fr 64px; gap: 12px; align-items: center; }
+.fl { font-size: 13.5px; color: var(--ink); line-height: 1.3; }
+.fl .small { display: block; font-size: 12px; }
+.fb { background: var(--grid); border-radius: 4px; height: 14px; overflow: hidden; }
+.fb .bar { height: 14px; border-radius: 4px; }
+.bar.last { background: var(--flag); }
+.bar.muted { background: color-mix(in srgb, var(--ink3) 45%, transparent); }
+.fv { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.duo { display: grid; gap: 3px; }
+.duo .bar { height: 5px; }
+@media (max-width: 560px) { .fr { grid-template-columns: 1fr 52px; } .fb { grid-column: 1 / -1; grid-row: 2; } }
+.step { display: grid; grid-template-columns: 34px 1fr; gap: 12px; }
+.num-badge { width: 28px; height: 28px; border-radius: 50%; background: var(--s1-soft); color: var(--s1); font-weight: 700; display: grid; place-items: center; font-size: 13px; }
+table.mini { font-size: 13px; margin: 4px 0 8px; }
+table.mini td { padding: 4px 8px; border-bottom: 1px solid var(--grid); white-space: normal; }
+table.mini td:first-child { color: var(--ink3); width: 130px; }
+.why-body h3 { margin: 10px 0 2px; color: var(--ink); }
+details.panel summary { cursor: pointer; }

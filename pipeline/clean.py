@@ -22,14 +22,23 @@ UNIT = CONTEST + ["county_fips", "county_name", "jurisdiction_fips", "precinct"]
 VCLASSES = ["dem", "rep", "other", "writein", "over", "under"]
 
 REQUIRED = ["precinct", "office", "party_simplified", "votes", "candidate", "district", "state_po"]
-OPTIONAL = ["mode", "county_name", "county_fips", "jurisdiction_fips", "stage", "special", "writein", "state"]
+OPTIONAL = ["mode", "county_name", "county_fips", "jurisdiction_fips", "stage", "special", "writein", "state", "party_detailed", "jurisdiction_name"]
+
+# Offices elected statewide. Some states report these by congressional district (e.g. Virginia);
+# the district is dropped so each statewide race is ONE contest.
+STATEWIDE_OFFICES = {"US SENATE", "GOVERNOR", "PRESIDENT", "US PRESIDENT", "SECRETARY OF STATE", "ATTORNEY GENERAL"}
+
+# Party labels that are the Democratic or Republican party under a state-specific name.
+DEM_ALIASES = r"^(?:DEMOCRAT(?:IC)?(?:\s+PARTY)?|DEMOCRATIC[\s\-]*FARMER[\s\-]*LABOR|DFL|DEMOCRATIC[\s\-]*NPL|DEMOCRATIC[\s\-]*NONPARTISAN[\s\-]*LEAGUE)$"
+REP_ALIASES = r"^(?:REPUBLICAN(?:\s+PARTY)?|GOP)$"
 
 
 # --------------------------------------------------------------------------- #
 # Reading
 # --------------------------------------------------------------------------- #
 def _norm_fips(s):
-    return s.fillna("").str.strip().str.replace(r"\.0+$", "", regex=True)
+    s = s.fillna("").str.strip().str.replace(r"\.0+$", "", regex=True)
+    return s.mask(s.str.upper().isin(["NAN", "NA", "NONE", "NULL"]), "")
 
 
 def read_raw(path, chunksize=250_000, only_states=None):
@@ -44,6 +53,7 @@ def read_raw(path, chunksize=250_000, only_states=None):
     cols = [c for c in REQUIRED + OPTIONAL if c in header]
     stats = Counter()
     parts = []
+    adjust_units = set()
 
     reader = pd.read_csv(
         path, usecols=cols, dtype=str, keep_default_na=False, na_values=[""], chunksize=chunksize
@@ -70,12 +80,21 @@ def read_raw(path, chunksize=250_000, only_states=None):
         if only_states:
             chunk = chunk[chunk["state_po"].str.upper().isin(only_states)]
 
-        # 4. votes must be a non-negative number
+        # 4. votes must be a non-negative number. -1 is used as a "not reported" code in some
+        #    states and is simply dropped. Larger negative numbers are adjustment rows (e.g.
+        #    Michigan's county-level "9999" precincts): the whole unit is later marked
+        #    non-geographic so it is never compared with real precincts.
         v = pd.to_numeric(chunk["votes"], errors="coerce")
         bad = v.isna()
         neg = v < 0
+        adj = v < -1
         stats["rows_invalid_votes"] += int(bad.sum())
         stats["rows_negative_votes"] += int(neg.sum())
+        if adj.any():
+            a = chunk[adj]
+            for k in zip(a["state_po"].str.upper().str.strip(), _norm_fips(a["county_fips"]) if "county_fips" in a else [""] * len(a),
+                         a["precinct"].fillna("(no name)").str.strip()):
+                adjust_units.add(k)
         chunk = chunk[~(bad | neg)].assign(votes=v[~(bad | neg)].astype("float64"))
         if chunk.empty:
             continue
@@ -86,17 +105,22 @@ def read_raw(path, chunksize=250_000, only_states=None):
         out["office"] = chunk["office"].fillna("").str.upper().str.strip()
         d = chunk["district"].fillna("0").str.strip()
         dn = pd.to_numeric(d, errors="coerce")
-        out["district"] = np.where(dn.notna(), dn.fillna(0).astype("int64").astype(str), d)
+        out["district"] = np.where(dn.notna(), dn.fillna(0).astype("int64").astype(str), d.str.upper())
+        out.loc[out["office"].isin(STATEWIDE_OFFICES), "district"] = "STATEWIDE"
         out["special"] = (
             chunk["special"].fillna("FALSE").str.upper().str.strip().eq("TRUE") if "special" in chunk else False
         )
         out["county_fips"] = _norm_fips(chunk["county_fips"]) if "county_fips" in chunk else ""
         out["county_name"] = chunk["county_name"].fillna("").str.strip() if "county_name" in chunk else ""
         out["jurisdiction_fips"] = _norm_fips(chunk["jurisdiction_fips"]) if "jurisdiction_fips" in chunk else ""
+        out["jurisdiction_name"] = chunk["jurisdiction_name"].fillna("").str.strip() if "jurisdiction_name" in chunk else ""
         out["precinct"] = chunk["precinct"].fillna("(no name)").str.strip()
         out["mode"] = chunk["mode"].fillna("TOTAL").str.upper().str.strip() if "mode" in chunk else "TOTAL"
         out["candidate"] = chunk["candidate"].fillna("").str.strip()
         out["party_simplified"] = chunk["party_simplified"].fillna("").str.upper().str.strip()
+        out["party_detailed"] = (
+            chunk["party_detailed"].fillna("").str.upper().str.strip() if "party_detailed" in chunk else ""
+        )
         out["writein"] = (
             chunk["writein"].fillna("FALSE").str.upper().str.strip().eq("TRUE") if "writein" in chunk else False
         )
@@ -106,6 +130,7 @@ def read_raw(path, chunksize=250_000, only_states=None):
     if not parts:
         raise SystemExit("No usable general-election rows were found in the input file.")
     df = pd.concat(parts, ignore_index=True)
+    df.attrs["adjust_units"] = adjust_units
     stats["rows_kept"] = len(df)
     return df, stats
 
@@ -114,6 +139,7 @@ def read_raw(path, chunksize=250_000, only_states=None):
 # Classifying rows
 # --------------------------------------------------------------------------- #
 def classify(df, stats):
+    attrs = dict(df.attrs)
     cand = df["candidate"].str.upper()
     over = cand.str.match(r"^OVER[\s\-]*VOTES?$")
     under = cand.str.match(r"^(?:UNDER[\s\-]*VOTES?|BLANK[\s\-]*VOTES?|BLANKS?)$")
@@ -129,7 +155,11 @@ def classify(df, stats):
     # candidate listed on two party lines (fusion voting) counts once, as a
     # Democrat or Republican.
     c = df.loc[df["cat"] == "cand", CONTEST + ["candidate", "party_simplified", "votes"]]
-    c = c.assign(is_dem=c["party_simplified"].eq("DEMOCRAT"), is_rep=c["party_simplified"].eq("REPUBLICAN"))
+    pd_ = df.loc[df["cat"] == "cand", "party_detailed"]
+    c = c.assign(
+        is_dem=c["party_simplified"].eq("DEMOCRAT") | pd_.str.match(DEM_ALIASES),
+        is_rep=c["party_simplified"].eq("REPUBLICAN") | pd_.str.match(REP_ALIASES),
+    )
     cand_tab = (
         c.groupby(CONTEST + ["candidate"], sort=False)
         .agg(is_dem=("is_dem", "max"), is_rep=("is_rep", "max"), votes=("votes", "sum"))
@@ -141,6 +171,7 @@ def classify(df, stats):
         default="other",
     )
     df = df.merge(cand_tab[CONTEST + ["candidate", "cls"]], on=CONTEST + ["candidate"], how="left")
+    df.attrs.update(attrs)
     df["vclass"] = np.where(df["cat"] == "cand", df["cls"], df["cat"])
 
     # Voting mode
@@ -238,7 +269,14 @@ def build_precinct_table(df, cand_tab, stats):
     pats = [re.compile(x, re.I) for x in config.NON_GEO_PATTERNS]
     names = pd.Series(p["precinct"].unique())
     nongeo_names = set(names[names.map(lambda s: any(r.search(s) for r in pats))])
-    p["nongeo"] = p["precinct"].isin(nongeo_names)
+    adj = df.attrs.get("adjust_units", set())
+    adj_mask = pd.Series([k in adj for k in zip(p["state_po"], p["county_fips"], p["precinct"])], index=p.index) if adj else False
+    # jurisdiction names are checked too (e.g. Rhode Island's "FEDERAL PRECINCT" 9001/9002)
+    jn = df.groupby(UNIT, sort=False)["jurisdiction_name"].first().reindex(pd.MultiIndex.from_frame(p[UNIT])).to_numpy()
+    jnames = pd.Series(pd.unique(jn.astype(str)))
+    nongeo_j = set(jnames[jnames.map(lambda s: any(r.search(s) for r in pats))])
+    p["nongeo"] = p["precinct"].isin(nongeo_names) | adj_mask | pd.Series(jn.astype(str), index=p.index).isin(nongeo_j)
+    stats["adjustment_units"] = int(np.sum(adj_mask)) if adj else 0
     p["zero_votes"] = p["cand_votes"] == 0
     vec = ["dem", "rep", "other", "writein", "over", "under"]
     p["dup_vector"] = p.duplicated(subset=CONTEST + vec, keep=False) & (p["two_party"] >= config.DUP_MIN_VOTES)

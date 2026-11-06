@@ -22,6 +22,7 @@ Honest heterogeneity (urban/rural, campus, retirement community) widens tau,
 so heterogeneous peer groups produce *fewer* flags, not more.
 """
 import numpy as np
+from scipy import stats
 
 import config
 from clean import CONTEST
@@ -79,10 +80,25 @@ def _fit_pass(p, n, gid, tau_min):
         # i.e. lie within one local standard deviation of it?
         srt = np.sort(pp)
         r = config.SUPPORT_RADIUS_SD * np.sqrt(t2 + s2)
-        support[idx] = (
-            np.searchsorted(srt, pp + r, side="right") - np.searchsorted(srt, pp - r, side="left") - 1
-        )
+        raw = np.searchsorted(srt, pp + r, side="right") - np.searchsorted(srt, pp - r, side="left") - 1
+        support[idx] = adjust_support(raw, z[idx], len(idx))
     return center, tau2, z, support
+
+
+def adjust_support(raw, z, m):
+    """Turn a raw neighbour count into 'excess' neighbours.
+
+    A precinct at z = 3 in a county of 1,000 precincts has ~23 peers within one standard deviation
+    of it by pure chance (normal tail), so counting neighbours alone would call every moderately
+    unusual precinct in a big county a "cluster". We subtract what chance allows: the 99th
+    percentile of a Poisson count with mean (m-1) * [Phi(|z|+r) - Phi(|z|-r)], minus SUPPORT_MAX.
+    A cluster is then: more similar precincts than chance would put there.
+    """
+    r = config.SUPPORT_RADIUS_SD
+    az = np.abs(np.nan_to_num(z, nan=0.0))
+    expect = (m - 1) * (stats.norm.cdf(az + r) - stats.norm.cdf(az - r))
+    allow = np.maximum(stats.poisson.ppf(0.99, expect) - config.SUPPORT_MAX, 0)
+    return (raw - allow).astype("int64")
 
 
 def score_metric(num, den, mask, gid_c, gid_d, min_peers=None, tau_min=0.03):
@@ -145,7 +161,7 @@ def is_flagged(z, support, thr):
 # --------------------------------------------------------------------------- #
 def metric_inputs(p):
     """Numerators, denominators and masks for the three metrics."""
-    base = (p["status"] == "two_party") & ~p["nongeo"]
+    base = (p["status"] == "two_party") & ~p["nongeo"] & ~p["zero_votes"]
     inputs = {
         "share": dict(
             num=p["dem"].to_numpy(),
@@ -169,8 +185,11 @@ def metric_inputs(p):
 def analyze(p, z_flag=None):
     """Add scores and flags to the precinct table. Returns (table, fits)."""
     z_flag = config.Z_FLAG if z_flag is None else z_flag
-    p = p.sort_values(CONTEST + ["county_fips", "county_name", "precinct"]).reset_index(drop=True)
-    gid_c = p.groupby(CONTEST + ["county_fips"], sort=False).ngroup().to_numpy()
+    p = p.sort_values(CONTEST + ["county_fips", "jurisdiction_fips", "county_name", "precinct"]).reset_index(drop=True)
+    # Lowest-level peer group = county x local election authority (jurisdiction). In most states the
+    # two are the same; where they differ (New England towns, Chicago vs suburban Cook County) the
+    # authority sets equipment, ballot design and reporting practice, so it is the fairer comparison.
+    gid_c = p.groupby(CONTEST + ["county_fips", "jurisdiction_fips"], sort=False).ngroup().to_numpy()
     gid_d = p.groupby(CONTEST, sort=False).ngroup().to_numpy()
 
     fits = {}

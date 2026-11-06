@@ -19,7 +19,9 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import calibrate  # noqa: E402
+import checks  # noqa: E402
 import clean  # noqa: E402
+import crossrace  # noqa: E402
 import config  # noqa: E402
 import export  # noqa: E402
 import metrics  # noqa: E402
@@ -28,6 +30,9 @@ import metrics  # noqa: E402
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", required=True, help="path to the raw MEDSL precinct CSV")
+    ap.add_argument("--companion", default=None,
+                    help="optional: MEDSL precinct CSV for ANOTHER office in the SAME election "
+                         "(e.g. 2018 Senate for 2018 House). Turns on the cross-race comparison.")
     ap.add_argument("--dataset-id", default="house-2018", help="folder name under docs/data (letters, digits, dashes)")
     ap.add_argument("--label", default="U.S. House of Representatives - Precinct Level 2018", help="full name shown on the site")
     ap.add_argument("--short-label", default=None, help="short tab name shown on the site")
@@ -69,13 +74,30 @@ def main(argv=None):
     for m, f in fits.items():
         n_assessed = int((~np.isnan(f["z"])).sum())
         n_flag = int(metrics.is_flagged(f["z"], f["support"], args.z_flag).sum())
-        log(f"    {m:6s}: {n_assessed:,} assessed, {n_flag:,} flagged at |z| >= {args.z_flag:g}")
+        log(f"    peer z  {m:6s}: {n_assessed:,} assessed, {n_flag:,} flagged at |z| >= {args.z_flag:g}")
+
+    cross = None
+    cross_info = None
+    if args.companion:
+        comp_path = Path(args.companion)
+        if not comp_path.exists():
+            raise SystemExit(f"Companion file not found: {comp_path}")
+        log(f"    reading companion race file {comp_path.name}")
+        comp, _ = crossrace.load_companion(comp_path, log=log)
+        p, cross_info, cross = crossrace.attach(p, comp, log=log)
+        cross_info["source_file"] = comp_path.name
+        del comp
+
+    log("    hierarchical model, multiple-testing control and verdicts")
+    p, chain = checks.run(p, fits, args.z_flag, cross=cross, rng=np.random.default_rng(args.seed + 1), log=log)
 
     calib = None
     if not args.skip_calibration:
         log("    calibration (simulating clean elections and injected anomalies)")
         rng = np.random.default_rng(args.seed)
         calib = calibrate.run_calibration(fits, p["state_po"].to_numpy(), rng, log=log)
+        calib["chain"] = calibrate.run_chain_calibration(p, fits, chain, cross, rng, args.z_flag, log=log)
+    enull_info = {m: r.get("enull_info") for m, r in chain.items()}
 
     log("4/4 writing website data")
     params = {
@@ -86,10 +108,15 @@ def main(argv=None):
         "stage": config.STAGE,
         "seed": args.seed,
         "only_states": sorted(only) if only else None,
+        "fdr_q": config.FDR_Q,
+        "enull_q": config.ENULL_Q,
+        "support_max": config.SUPPORT_MAX,
+        "cross_explain_z": config.CROSS_EXPLAIN_Z,
+        "hb_min_district": config.HB_MIN_DISTRICT,
     }
     export.export_dataset(
         p, contests, state_names, calib, stats, args.out, args.dataset_id, args.label,
-        args.short_label, src.name, params, log=log,
+        args.short_label, src.name, params, cross_info=cross_info, enull_info=enull_info, log=log,
     )
     log(f"done. Output is in {Path(args.out) / args.dataset_id}")
     return 0

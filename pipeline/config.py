@@ -19,8 +19,8 @@ MIN_PEERS = 50
 
 # "Isolated outlier" rule. A precinct that is statistically far from its peers
 # is only flagged if it is NOT part of a cluster of similar precincts: at most
-# SUPPORT_MAX other peers may lie within SUPPORT_RADIUS_SD local standard
-# deviations of it. Clusters of similar precincts (campus precincts, a
+# SUPPORT_MAX MORE other peers than chance would put there may lie within
+# SUPPORT_RADIUS_SD local standard deviations of it (see metrics.adjust_support). Clusters of similar precincts (campus precincts, a
 # segregated neighbourhood, a retirement community) are real heterogeneity, not
 # anomalies. Precincts that would have been flagged but fail this rule are not
 # hidden: they get dq code "C" and are counted separately on the site.
@@ -51,6 +51,10 @@ NON_GEO_PATTERNS = [
     r"affidavit|unallocated|unassigned|not\s+assigned|one[\s\-]*stop|"
     r"early\s+vot(?:e|ing)|mail(?:[\s\-]*in)?\s+ballots?|total\s+votes)\b",
     r"^(?:early|mail|federal|military|statewide|totals?|in[\s\-]*person|cvr)$",
+    r"9{4}$",  # county-level pseudo-precincts: Michigan "9999" adjustments, Oklahoma "<county>9999" absentee pools
+    r"\bfederal\s+precinct\b",  # Rhode Island federal-only (overseas/new-resident) ballots
+    r"\bcounty\s+floating\b|\bfloating\b",  # Illinois/Kentucky county-wide ballot pools
+    r"\bcurbside\b",  # North Carolina curbside-voting pools
 ]
 
 # ---- Calibration ------------------------------------------------------------
@@ -67,4 +71,28 @@ CALIB_MAX_REPS = 60
 SEED = 20181106
 
 # ---- Export -----------------------------------------------------------------
-QUEUE_SIZE = 300  # length of the national review queue shown on the site
+QUEUE_SIZE = 300  # screened precincts shown in the review queue (all persisting ones are always kept)
+QUEUE_MAX = 3000  # hard cap on the queue length
+
+# ---- Hierarchical model (hierarchical.py) -----------------------------------
+HB_MIN_DISTRICT = 10       # a district/race needs this many assessable precincts to be modelled
+HB_MIN_COUNTY_OWN = 3      # a county needs this many to have its own centre/spread estimate
+HB_CENTER_PRIOR_N = 20     # prior strength (in precincts) for pooling a county centre toward its district
+HB_TAU_PRIOR_N = 30        # prior strength (in precincts) for pooling spreads (county->district->dataset)
+
+# ---- Multiple testing (fdr.py) ----------------------------------------------
+FDR_Q = 0.05               # Benjamini-Hochberg: precincts with q < FDR_Q are "significant"
+ENULL_Q = 0.05             # Efron empirical-null FDR: q below this = not ordinary real-world variation
+LFDR_MIN_N = 1000          # fewer tests than this: the empirical-null check is not run (reported as such)
+LFDR_RANGE = 8.0           # histogram range (z) for the density estimate
+LFDR_BIN = 0.2
+LFDR_DF = 7                # spline degrees of freedom (Efron's default)
+
+# ---- Cross-race comparison (crossrace.py) -----------------------------------
+CROSS_MIN_PEERS = 30       # peers needed for the gap comparison (county, else whole race)
+CROSS_TAU_MIN = 0.02       # floor on between-precinct spread of the gap
+CROSS_EXPLAIN_Z = 3.0      # |gap z| below this = the other race shows the same pattern ("explained")
+
+# ---- Full-chain calibration -------------------------------------------------
+CHAIN_REPS = 4             # simulated clean elections pushed through every check
+TAIL_CAL_REPS = 4          # simulations used to calibrate the hierarchical p-value tails (checks.tail_calibration)

@@ -1,81 +1,98 @@
 # Precinct Review
 
-Screens precinct-level election results for results that are unusual **compared with comparable precincts**, and publishes them as a static website for human review. A flag is a lead to check against official records, never a finding of fraud.
+Screens precinct-level election results for precincts that are unusual **compared with comparable precincts**, then runs every screened precinct through independent cross-checks. Only precincts that survive every check are listed for human review. A listed precinct is a lead to check against official records, never a finding of fraud.
 
 ```
-raw/                 your MEDSL CSVs (not committed)
-pipeline/            Python: clean -> score -> calibrate -> export JSON
+raw/                 your MEDSL CSVs (not committed to GitHub)
+pipeline/            Python: clean -> score -> cross-check -> calibrate -> export JSON
 docs/                the website (served by GitHub Pages)
 docs/data/           pipeline output; the site reads only this
-tests/               tests (run: python tests/test_pipeline.py)
+tests/               tests (run: python3 tests/test_pipeline.py)
 ```
+
+## What the pipeline does
+
+| Step | Method | Raises or rules out |
+|---|---|---|
+| Peer z-score | precinct vs. comparable precincts in the same race, county and local election authority | raises (screen) |
+| Hierarchical Bayesian model | beta-binomial with partial pooling county -> district -> dataset; posterior predictive p-values, calibrated by simulation | raises (screen); works for small counties |
+| Multiple testing | Benjamini-Hochberg q-values on the hierarchical p-values | rules out (`T`) |
+| Empirical null | Efron's central-matching empirical null, tail-area FDR | rules out (`E`) |
+| Clusters | more similar precincts nearby than chance allows | rules out (`C`) |
+| Cross-race | same precinct, another race on the same ballot (needs a companion file) | rules out (`L`) when both races show the same pattern; raises a gap signal (`X`) when they differ |
+
+Signals: vote share (`S`), under-votes (`U`), voting mode (`M`), cross-race gap (`X`). Settings are in `pipeline/config.py`.
 
 ## 1. One-time setup
 
-Needs Python 3.10+.
+Needs Python 3.10+. Use the command `python3` (plain `python` is Python 2 on some machines).
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-python tests/test_pipeline.py      # should print three PASS lines
+pip install -r requirements.txt    # numpy, pandas, scipy
+python3 tests/test_pipeline.py     # should print five PASS lines
 ```
 
-## 2. Run it on the 2018 House file
+If you already had a `.venv` from before, run the `pip install` line again: SciPy is new.
 
-Put the full MEDSL file in `raw/` (any file name), then:
+## 2. Process the data
+
+Put the MEDSL files in `raw/`. Each run makes one tab on the site.
+
+**House 2018** (add the 2018 Senate file as `--companion` once you have it):
 
 ```bash
-python pipeline/run_pipeline.py \
+python3 pipeline/run_pipeline.py \
   --input raw/HOUSE_precinct_general.csv \
+  --companion raw/SENATE_precinct_general_2018.csv \
   --dataset-id house-2018 \
   --label "U.S. House of Representatives - Precinct Level 2018" \
   --short-label "House 2018"
 ```
 
-Expect about 1 to 2 minutes and a few GB of RAM for ~150 MB. Add `--only-states AL,TX` for a quick trial. Output goes to `docs/data/house-2018/` (about 10 to 20 MB of JSON in many small files; the site loads one state at a time).
+**Senate 2020** (companion: the 2020 House file):
 
-The pipeline drops blank comma-only padding lines, so a spreadsheet-exported file works as is.
+```bash
+python3 pipeline/run_pipeline.py \
+  --input raw/2020-SENATE-precinct-general.csv \
+  --companion raw/2020-HOUSE-precinct-general.csv \
+  --dataset-id senate-2020 \
+  --label "U.S. Senate - Precinct Level 2020" \
+  --short-label "Senate 2020"
+```
+
+Use your actual file names. Leave out the `--companion` line if you don't have that file yet: everything except the cross-race check still runs. The companion must be **the same election year** (it compares two races on the same ballot).
+
+Each run takes about 1-2 minutes and writes `docs/data/<dataset-id>/`. Add `--only-states AL,GA` for a quick trial; `--skip-calibration` skips the simulations (faster, but the Reliability page is then empty).
+
+Where to get the companion files: [MIT Election Lab data page](https://electionlab.mit.edu/data) -> precinct-level returns for U.S. Senate 2018 and U.S. House 2020.
 
 ## 3. Look at it locally
 
-Browsers block `fetch` from `file://`, so serve the folder:
-
 ```bash
-python -m http.server 8000 --directory docs
+python3 -m http.server 8000 --directory docs
 ```
 
-Open http://localhost:8000.
+Open http://localhost:8000. Stop the server with Ctrl+C (not Ctrl+Z).
 
-## 4. Publish on GitHub Pages (free)
+## 4. Update the live site on GitHub
 
-1. Remove the demo data: `rm -rf docs/data/demo-synthetic`, then delete its entry in `docs/data/datasets.json`. (Re-running the pipeline for `house-2018` after deleting `docs/data` also does it.)
-2. Create a GitHub repository, then:
-   ```bash
-   git init && git add . && git commit -m "Precinct Review"
-   git branch -M main
-   git remote add origin https://github.com/<you>/<repo>.git
-   git push -u origin main
-   ```
-3. In the repo: **Settings -> Pages -> Build and deployment -> Source: Deploy from a branch -> Branch `main`, folder `/docs`**.
-4. Your site appears at `https://<you>.github.io/<repo>/` in a minute or two.
+From the project folder, after copying in the new files:
 
-`raw/` is git-ignored, so the big CSV is never uploaded (GitHub rejects files over 100 MB). Only the small JSON output is.
+```bash
+git status                      # check: no raw/ CSVs or .venv/ listed
+git add -A
+git commit -m "Add hierarchical model, FDR checks, cross-race comparison, Senate 2020"
+git push
+```
 
-Alternatives: Netlify, Cloudflare Pages or Vercel, each pointed at the `docs` folder, also free.
-
-## 5. Adding more datasets later
-
-Run the pipeline again with a new `--dataset-id` and `--label`. Each run adds a tab; existing tabs are kept.
-
-## Settings that change what gets flagged
-
-All in `pipeline/config.py`: peer-group minimum (`MIN_PEERS`), flag threshold (`Z_FLAG`), the isolation rule (`SUPPORT_MAX`), and small-precinct cutoffs. After changing one, re-run; the Reliability page shows its new false-alarm rate.
+GitHub Pages refreshes within a couple of minutes. Re-run the pipeline and repeat these three commands whenever the data or settings change.
 
 ## Known limits (also on the site)
 
-- Contests with fewer than 50 comparable precincts are not assessed at all. This is deliberate: simulations showed spread estimates from small peer groups are too unreliable. Small or heavily split districts will therefore show "not assessed".
-- No turnout metric: the MEDSL file has no registered-voter counts.
-- The Reliability simulation uses the detector's own model, so it tests calibration, not realism.
-- Precinct names are not stable across years, so there is no year-over-year comparison.
-- Only the 2018 House file's layout has been tested on real rows (the 135 Alabama rows); other states' mode and naming quirks are covered by synthetic tests only. Skim the "data quality" counts on the Method page after each run.
+- Clean elections for calibration are simulated from the pipeline's own model: this checks each step is calibrated, not that real precincts behave like the model.
+- Single-precinct shifts are hard to detect (about 20% for a 30-point shift). A short list is not proof that nothing happened.
+- Races with fewer than 10 assessable precincts are not assessed. Contests with only one major party, or two candidates from the same party, are skipped.
+- Precinct names must match across the two files for the cross-race check; the site reports the match rate. Precincts split between districts are skipped.
+- No turnout metric (no registration counts in MEDSL files). eforensics, census covariates and spatial checks are not included yet.

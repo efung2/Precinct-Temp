@@ -18,8 +18,11 @@ real flag counts with the null expectation to show where reality has fatter
 tails than the model.
 """
 import numpy as np
+from scipy import stats
 
 import config
+import fdr
+import hierarchical as hb
 from metrics import is_flagged, score_metric
 
 
@@ -135,3 +138,139 @@ def run_calibration(fits, states, rng, log=print):
     else:
         result["notes"].append("Too few assessed precincts to run the injection test.")
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Full-chain calibration (hierarchical model + FDR + verdicts)
+# --------------------------------------------------------------------------- #
+def run_chain_calibration(p, fits, chain, cross, rng, z_flag, reps=None, log=print):
+    """Simulate clean elections from the HIERARCHICAL model and push them through every check.
+
+    Reports, per signal:
+      * hierarchical p-value calibration (share of clean precincts with p below 0.01, 0.001, 1e-4),
+        overall and for small counties (<= 5 precincts) that the old 50-peer rule skipped
+      * how many precincts a clean election puts into the funnel, and how many survive to the end
+      * detection power for injected vote-share shifts at each stage of the funnel
+    """
+    import checks
+    from metrics import score_metric
+
+    reps = config.CHAIN_REPS if reps is None else reps
+    out = {"reps": reps, "signals": {}, "power": None,
+           "note": "Clean elections are simulated from the fitted hierarchical model, so this "
+                   "checks that each step is calibrated; it cannot show that real precincts follow the model."}
+    gid_c = fits["share"]["gid_c"]
+    gid_d = fits["share"]["gid_d"]
+
+    for m in ("share", "under", "mode"):
+        r = chain[m]
+        f = r["fit"]
+        rows = np.flatnonzero(f["level"] > 0)
+        if len(rows) < config.HB_MIN_DISTRICT:
+            out["signals"][m] = {"assessed": int(len(rows)), "reps": 0}
+            continue
+        den = r["den"].astype(float)
+        mask = np.zeros(len(den), bool)
+        mask[rows] = True
+        small = mask & (f["m_c"] <= 5)
+        thr = (0.01, 0.001, 1e-4)
+        cnt = np.zeros(len(thr))
+        cnt_small = np.zeros(len(thr))
+        scr = 0
+        per = 0
+        for _ in range(reps):
+            k = np.zeros(len(den))
+            k[rows] = hb.simulate(rng, den[rows], f["mu"][rows], f["v"][rows])
+            peer = score_metric(k, den, mask & (den >= config.MIN_DEN), gid_c, gid_d, tau_min=config.TAU_MIN[m])
+            res = checks.score_metric_chain(k, den, mask, gid_c, gid_d, config.TAU_MIN[m],
+                                            peer["z"], peer["support"], z_flag, None, dfs=r.get("dfs"))
+            pv = res["p"]
+            for i, t in enumerate(thr):
+                cnt[i] += np.nansum(pv[mask] < t)
+                cnt_small[i] += np.nansum(pv[small] < t)
+            scr += int(res["screened"].sum())
+            per += int((res["v"] == "P").sum())
+        n_all, n_small = mask.sum() * reps, max(small.sum() * reps, 1)
+        out["signals"][m] = {
+            "tail_df": {k: (None if not np.isfinite(v) else v) for k, v in r.get("dfs", {}).items() if k != "diag"},
+            "assessed": int(mask.sum()),
+            "small_county_precincts": int(small.sum()),
+            "reps": reps,
+            "p_below": {f"{t:g}": {"nominal": t, "observed": float(cnt[i] / n_all),
+                                   "observed_small": float(cnt_small[i] / n_small) if small.any() else None}
+                        for i, t in enumerate(thr)},
+            "expected_screened": round(scr / reps, 2),
+            "expected_persist": round(per / reps, 2),
+        }
+        log(f"    full-chain null [{m}]: {mask.sum():,} precincts x {reps} reps; "
+            f"clean data screened {scr / reps:.1f}, persisted {per / reps:.2f}")
+
+    # ---- cross-race gap under the null
+    if cross is not None:
+        res = cross["fit"]
+        rows = np.flatnonzero(np.isfinite(res["z"]))
+        if len(rows) >= config.CROSS_MIN_PEERS:
+            import crossrace
+            scr = per = 0
+            mask = np.zeros(len(cross["gap"]), bool)
+            mask[rows] = True
+            for _ in range(reps):
+                g = np.full(len(mask), np.nan)
+                g[rows] = rng.normal(res["center"][rows], np.sqrt(res["tau2"][rows] + cross["s2"][rows]))
+                sres = crossrace.score_gap(g, cross["s2"], mask, cross["gid_c"], cross["gid_d"])
+                z = sres["z"]
+                q = fdr.bh_qvalues(np.where(np.isfinite(z), 2 * stats.norm.sf(np.abs(z)), np.nan))
+                lf, _ = fdr.empirical_null_q(z)
+                screened = ((np.abs(np.nan_to_num(z)) >= z_flag) & (sres["support"] <= config.SUPPORT_MAX)) | \
+                    (np.nan_to_num(q, nan=1.0) < config.FDR_Q)
+                v = checks.verdicts(screened, q, lf, sres["support"])
+                scr += int(screened.sum())
+                per += int((v == "P").sum())
+            out["signals"]["cross"] = {"assessed": int(len(rows)), "reps": reps,
+                                       "expected_screened": round(scr / reps, 2),
+                                       "expected_persist": round(per / reps, 2)}
+            log(f"    full-chain null [cross]: screened {scr / reps:.1f}, persisted {per / reps:.2f}")
+
+    # ---- power: inject a vote-share shift into one precinct per race, follow it through the funnel
+    r = chain["share"]
+    f = r["fit"]
+    rows = np.flatnonzero(f["level"] > 0)
+    if len(rows) >= config.HB_MIN_DISTRICT:
+        den = r["den"].astype(float)
+        mask = np.zeros(len(den), bool)
+        mask[rows] = True
+        stages = ("screened", "after_T", "after_E", "after_C")
+        hits = {s: np.zeros(len(config.SHIFTS)) for s in stages}
+        tot = np.zeros(len(config.SHIFTS))
+        preps = max(2, reps // 2)
+        for si, shift in enumerate(config.SHIFTS):
+            for _ in range(preps):
+                k = np.zeros(len(den))
+                k[rows] = hb.simulate(rng, den[rows], f["mu"][rows], f["v"][rows])
+                rr = rng.random(len(rows))
+                order = rows[np.lexsort((rr, gid_d[rows]))]
+                first = np.r_[True, gid_d[order][1:] != gid_d[order][:-1]]
+                pick = order[first]
+                pick = pick[den[pick] >= 100]
+                sign = rng.choice([-1, 1], size=len(pick))
+                k[pick] = np.clip(k[pick] + np.rint(shift * den[pick]) * sign, 0, den[pick])
+                peer = score_metric(k, den, mask & (den >= config.MIN_DEN), gid_c, gid_d, tau_min=config.TAU_MIN["share"])
+                res = checks.score_metric_chain(k, den, mask, gid_c, gid_d, config.TAU_MIN["share"],
+                                                peer["z"], peer["support"], z_flag, None, dfs=r.get("dfs"))
+                v = res["v"][pick]
+                tot[si] += len(pick)
+                hits["screened"][si] += (v != "").sum()
+                hits["after_T"][si] += (~np.isin(v, ["", "T"])).sum()
+                hits["after_E"][si] += (~np.isin(v, ["", "T", "E"])).sum()
+                hits["after_C"][si] += (v == "P").sum()
+        out["power"] = {
+            "shifts": list(config.SHIFTS),
+            "stages": list(stages),
+            "rate": {s: [float(h / t) if t else None for h, t in zip(hits[s], tot)] for s in stages},
+            "trials": [int(t) for t in tot],
+            "note": "Shift applied to one precinct (100+ votes) per race, in one race only. The cross-race "
+                    "check is not simulated: it only removes precincts that look the same in BOTH races, "
+                    "so a single-race shift would not be removed by it.",
+        }
+        log(f"    full-chain power: {len(config.SHIFTS)} shifts x {preps} reps")
+    return out
