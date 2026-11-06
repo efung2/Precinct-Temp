@@ -119,7 +119,8 @@
         S.contest = parts[2] && S.stateData.contests[decodeURIComponent(parts[2])] ? decodeURIComponent(parts[2])
           : (keys.find((k) => S.stateData.contests[k].rows) || keys[0]);
         renderExplore(parts[3] ? decodeURIComponent(parts[3]) : null);
-      } else if (view === "reliability") renderReliability();
+      } else if (view === "eforensics") await renderEforensics();
+      else if (view === "reliability") renderReliability();
       else if (view === "method") renderMethod();
       else renderOverview();
     } catch (e) {
@@ -481,7 +482,90 @@
     app.innerHTML = h;
   }
 
+  /* ---------------------------------------------------------------- eforensics comparison */
+  const EF = { data: null, st: null };
+  const pc = (a, b, d = 1) => (b ? ((100 * a) / b).toFixed(d) + "%" : "–");
+
+  async function renderEforensics() {
+    if (!EF.data) EF.data = await getJSON("data/eforensics-senate-2020/comparison.json");
+    const D = EF.data, C = D.census, R = D.real, SIM = D.sim;
+    if (!C) { app.innerHTML = '<div class="panel"><h2>No eforensics results yet</h2><p class="muted">Run pipeline/run_eforensics.py (see README).</p></div>'; return; }
+    const t = C.totals;
+    let h = "<h1>eforensics vs. our checks</h1><p class='muted'>2020 U.S. Senate, " + fmt(t.states) + " states. Both methods are run on the <b>same " + fmt(t.units) + " census voting districts</b>: voting-age population and Senate votes from the ALARM Project's census-2020 files (votes from VEST). eforensics is Walter Mebane's Bayesian finite-mixture model of election frauds (the \"qbl\" model), re-implemented here from his specification.</p>";
+    h += '<div class="cards">' +
+      card("Census districts analysed", fmt(t.units), fmt(t.states) + " states, same districts for both methods") +
+      card("eforensics: P(fraud) > 0.5", fmt(t.flag_05), pc(t.flag_05, t.units) + " of districts; " + fmt(t.flag_05_min_chain) + "–" + fmt(t.flag_05_max_chain) + " across chains", "accent") +
+      card("eforensics: P(fraud) > 0.9", fmt(t.flag_09), pc(t.flag_09, t.units) + " of districts") +
+      card("Our checks: remain for review", fmt(t.ours_remain), pc(t.ours_remain, t.units, 2) + " of districts; " + fmt(t.ours_screened) + " screened first") + "</div>";
+    h += '<div class="callout"><b>Read these eforensics numbers with care.</b> This re-implementation puts ' + pc(t.flag_05, t.units, 0) + ' of districts in a fraud class and attributes ' + fmt(Math.round(t.fraud_votes)) + " of " + fmt(t.leader_votes) + " winners' votes (" + pc(t.fraud_votes, t.leader_votes, 0) + ") to fraud. That is far more than published applications of eforensics report (see below), and the model does the same on simulated elections with no fraud at all. Chains agreed (R-hat ≤ 1.1) in only " + fmt(t.converged_states) + " of " + fmt(t.states) + " states. These figures describe how the model behaves on this data, not how much fraud there was; they should be confirmed with the authors' R package (an R script is included in the project) before being quoted.</div>";
+    h += '<div class="panel"><h2>What an eforensics "fraud" classification means</h2><p class="muted">The model assumes that, without fraud, turnout and the winner\'s share vary across precincts independently and symmetrically on the logit scale, with each precinct free to deviate. Precincts that fit better with extra turnout and extra votes for the winner (for example, places where high turnout goes with strong support for the winner) are assigned to a fraud class. Real places produce such patterns for ordinary reasons: partisan geography, mobilisation, age and citizenship (voting-age population includes non-citizens). Mebane himself describes part of what the model labels as fraud as voters\' strategic behaviour.</p></div>';
+    if (SIM && SIM.scenarios) {
+      h += '<div class="panel"><h2>Test with known truth: simulated elections</h2><p class="small">Elections simulated on ' + esc(SIM.template_state) + "'s " + fmt(SIM.units) + " census districts (real sizes and counties). Both methods see exactly the same simulated counts. In the clean scenarios every flag is a false alarm.</p><div class='tw'><table><tr><th>Scenario</th><th class='num'>Planted frauds</th><th class='num'>eforensics &gt;0.5: false / caught</th><th class='num'>eforensics &gt;0.9: false / caught</th><th class='num'>Ours (remain): false / caught</th></tr>" +
+        SIM.scenarios.map((s) => "<tr><td style='white-space:normal;min-width:240px'>" + esc(s.description) + (s.eforensics.converged ? "" : " <span class='badge ok'>chains disagree</span>") + '</td><td class="num">' + fmt(s.planted) + '</td><td class="num">' + fmt(s.eforensics.false_05) + " / " + fmt(s.eforensics.caught_05) + '</td><td class="num">' + fmt(s.eforensics.false_09) + " / " + fmt(s.eforensics.caught_09) + '</td><td class="num">' + fmt(s.ours.false_remain) + " / " + fmt(s.ours.caught_remain) + "</td></tr>").join("") +
+        "</table></div><p class='small'>Our checks were run without a second race here (no companion race is simulated), so the cross-race check could not help them. Planted fraud follows eforensics' own definition of incremental fraud (moderate shares of abstainers and opposition votes moved to the leader). <b>Neither method does well:</b> eforensics catches most planted frauds but buries them among more than a thousand false alarms; our checks raise no false alarms but miss this kind of fraud, because they compare vote shares only and do not use turnout. Adding a turnout check is the obvious next improvement.</p></div>";
+    }
+
+    h += '<div class="panel"><h2>Election fingerprint</h2><p class="small">Each dot is a census district: turnout (votes ÷ voting-age population) against the leader\'s share of the vote. Orange: eforensics P(fraud) &gt; 0.5. Ringed: remains on our review list.</p><div class="controls"><select id="efst" aria-label="State">' +
+      C.states.map((s) => '<option value="' + esc(s.state_po) + '">' + esc(s.state) + "</option>").join("") + '</select></div><div id="efsc"></div>' +
+      '<div class="legend"><span><i style="background:var(--s1)"></i>Not flagged by eforensics</span><span><i style="background:var(--flag)"></i>eforensics P(fraud) &gt; 0.5</span><span><i class="ring"></i>Remains on our list</span></div></div>';
+
+    h += '<div class="panel"><h2>By state</h2><p class="small">"Chains" shows the range of eforensics flags across four independent sampling chains; a wide range or "no" under Converged means the model\'s answer depends on the run.</p><div class="tw"><table><tr><th>State</th><th class="num">Districts</th><th class="num">Fraud share π (2+3)</th><th class="num">eforensics &gt;0.5</th><th class="num">Chains</th><th class="num">&gt;0.9</th><th class="num">"Fraudulent" votes</th><th>Converged</th><th class="num">Ours: screened</th><th class="num">Ours: remain</th><th class="num">Both</th></tr>' +
+      C.states.map((s) => "<tr><td>" + esc(s.state) + '</td><td class="num">' + fmt(s.n) + '</td><td class="num">' + pc(s.pi_mean[1] + s.pi_mean[2], 1) + '</td><td class="num">' + fmt(s.flag_05) + " <span class='small'>(" + pc(s.flag_05, s.n, 0) + ')</span></td><td class="num small">' + Math.min(...s.flag_05_by_chain) + "–" + Math.max(...s.flag_05_by_chain) + '</td><td class="num">' + fmt(s.flag_09) + '</td><td class="num">' + fmt(Math.round(s.fraud_votes_mean)) + " <span class='small'>(" + pc(s.fraud_votes_mean, s.leader_votes, 1) + ")</span></td><td>" + (s.converged ? "yes" : "<span class='badge ok'>no (R-hat " + Math.max(...s.rhat_pi.filter((x) => x != null)).toFixed(2) + ")</span>") + '</td><td class="num">' + fmt(s.ours_screened) + '</td><td class="num"><b>' + fmt(s.ours_remain) + '</b></td><td class="num">' + fmt(s.ef05_and_ours_remain) + "</td></tr>").join("") + "</table></div></div>";
+
+    const why = {}; C.states.forEach((s) => Object.entries(s.ef05_outcome_in_ours || {}).forEach(([k, v]) => (why[k] = (why[k] || 0) + v)));
+    const lab = { "not screened": "Not unusual against comparable districts", T: "Screened, not significant after multiple testing", E: "Screened, within the real spread of districts", C: "Screened, part of a cluster of similar districts", L: "Screened, same pattern in the presidential race" };
+    const ord = ["not screened", "T", "E", "C", "L"];
+    const mx = Math.max(1, ...ord.map((k) => why[k] || 0));
+    h += '<div class="panel"><h2>What our checks say about eforensics\' flags</h2><p class="small">The ' + fmt(t.flag_05) + " districts eforensics puts in a fraud class (P &gt; 0.5), by how our checks treat them. " + fmt(t.ef05_and_ours_remain) + " are also on our review list.</p><div class='funnel'>" +
+      ord.map((k) => '<div class="fr"><div class="fl">' + esc(lab[k]) + '</div><div class="fb"><div class="bar" style="width:' + Math.max(0.4, (100 * (why[k] || 0)) / mx) + '%"></div></div><div class="fv">' + fmt(why[k] || 0) + "</div></div>").join("") + "</div></div>";
+
+    if (R && R.states && R.states.length) {
+      const cen = {}; C.states.forEach((s) => (cen[s.state_po] = s));
+      h += '<div class="panel"><h2>Robustness: real official counts</h2><p class="small">The census-district votes are estimates. In these states, census districts could be matched to MEDSL precincts with agreeing vote totals, so eforensics was re-run on the <b>official MEDSL counts</b> (voting-age population from the matched district). Our side is the Senate 2020 tab, restricted to the same precincts.</p><div class="tw"><table><tr><th>State</th><th class="num">Matched precincts</th><th class="num">eforensics &gt;0.5 (real counts)</th><th class="num">eforensics &gt;0.5 (census estimates)</th><th class="num">&gt;0.9 (real)</th><th>Converged</th><th class="num">Ours: remain</th></tr>' +
+        R.states.map((s) => { const c = cen[s.state_po]; return "<tr><td>" + esc(s.state_po) + '</td><td class="num">' + fmt(s.n) + '</td><td class="num">' + fmt(s.flag_05) + " <span class='small'>(" + pc(s.flag_05, s.n, 0) + ')</span></td><td class="num">' + (c ? pc(c.flag_05, c.n, 0) : "–") + '</td><td class="num">' + fmt(s.flag_09) + "</td><td>" + (s.converged ? "yes" : "<span class='badge ok'>no</span>") + '</td><td class="num"><b>' + fmt(s.ours_remain) + "</b></td></tr>"; }).join("") +
+        "</table></div><p class='small'>Matching rule per state and match rates: " + (R.match_report || []).filter((m) => m.used).map((m) => esc(m.state_po) + " " + m.usable_pct + "%").join(", ") + ". States below 45% were not used.</p></div>";
+    }
+
+    h += '<div class="panel"><h2>Compared with published results</h2><ul class="muted">' +
+      "<li><b>eforensics as used by its author.</b> For the 2022 Philippine presidential election, Mebane's analysis of 105,649 precincts placed about 2,100 precincts in \"likely fraud\" and about 25,100 more in a \"mix of fraud and voter vote-shifting\" (roughly a quarter of precincts), about 2.1 million votes in total, and he concluded the result was not changed. eforensics, as its author applies it, routinely places many precincts in fraud classes. This re-implementation goes further (" + pc(t.flag_05, t.units, 0) + " of districts), so it is, if anything, harsher than the original.</li>" +
+      "<li><b>A regression-based check of 2020.</b> A RAND study (Johnson, 2021) predicted every county's 2020 presidential vote from demographics and past results, then flagged counties more than 4 standard deviations off. In the disputed states only Rockdale County, Georgia, crossed that line, and the author found no conclusive evidence of localised fraud. Our checks reach a similar picture at the precinct level: " + fmt(t.ours_remain) + " of " + fmt(t.units) + " districts remain for review.</li></ul>" +
+      '<p class="small">Sources: <a href="https://newsinfo.inquirer.net/?p=1607812">Inquirer, June 2022 (Mebane on the Philippine election)</a>; <a href="https://arxiv.org/abs/2110.03661">Johnson, Constraining Localized Vote Tampering in the 2020 US Presidential Election (arXiv 2110.03661)</a>.</p></div>';
+    h += '<div class="panel"><h2>How this comparison was made</h2><ul class="muted">' +
+      "<li><b>Units.</b> Census voting districts with voting-age population, at least one vote, and no more votes than voting-age residents (" + fmt(t.units) + " districts). Maine and Oregon (block-level files only), Arkansas (no Democrat ran) and Louisiana (multi-candidate race) are excluded, as is Georgia's special election.</li>" +
+      "<li><b>eforensics.</b> Mebane's qbl specification: three classes (no fraud, incremental, extreme), k = 0.7, district-level random effects with N(0,1) and Exp(5) priors, binomial likelihoods for abstentions and leader votes, intercepts only. Re-implemented in Python (NumPyro); the class indicator is summed out and recovered per draw. " + D.settings.chains + " chains × " + D.settings.samples_per_chain + " draws after " + D.settings.warmup + " warm-up iterations per state. Leader = statewide winner; eligible voters = voting-age population (includes non-citizens, so turnout is understated where many residents cannot vote).</li>" +
+      "<li><b>Flags.</b> eforensics: posterior probability of a fraud class above 0.5 (headline) or 0.9. Ours: precincts that survive every check (see Method), with the 2020 presidential race in the same districts as the cross-race companion.</li>" +
+      "<li><b>Caveats.</b> This is a re-implementation, not the authors' JAGS code; an R script in the project repeats the analysis with the original package for a cross-check. The model's posterior is often multimodal (\"incremental fraud\" with a tiny magnitude is almost the same as no fraud), so chains are reported separately. Census-district votes are estimates; the real-count table checks that conclusions do not depend on them.</li></ul></div>";
+    app.innerHTML = h;
+    const sel = $("#efst");
+    const pick = EF.st || (C.states.find((s) => s.state_po === "GA") || C.states[0]).state_po;
+    sel.value = pick;
+    sel.onchange = () => { EF.st = sel.value; drawFingerprint(sel.value); };
+    drawFingerprint(pick);
+  }
+
+  async function drawFingerprint(st) {
+    const el = $("#efsc");
+    let d;
+    try { d = await getJSON("data/eforensics-senate-2020/units/" + st + ".json"); } catch (e) { el.innerHTML = '<p class="empty">No district data for this state.</p>'; return; }
+    const ix = {}; d.fields.forEach((f, i) => (ix[f] = i));
+    const { w, h } = size(el, 340), pad = { l: 58, r: 12, t: 10, b: 36 };
+    const X = (v) => pad.l + v * (w - pad.l - pad.r), Y = (v) => h - pad.b - v * (h - pad.t - pad.b);
+    let g = "";
+    for (let i = 0; i <= 4; i++) { const v = i / 4; g += '<line class="grid" x1="' + pad.l + '" x2="' + (w - pad.r) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text x="' + (pad.l - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + pct(v, 0) + '</text><text x="' + X(v) + '" y="' + (h - 16) + '" text-anchor="middle">' + pct(v, 0) + "</text>"; }
+    g += '<text x="' + (pad.l + (w - pad.l - pad.r) / 2) + '" y="' + (h - 2) + '" text-anchor="middle">turnout (votes ÷ voting-age population)</text>';
+    const rows = d.rows.slice().sort((a, b) => (a[ix.pfraud] > 0.5) - (b[ix.pfraud] > 0.5) || a[ix.ours_remain] - b[ix.ours_remain]);
+    const dots = rows.map((r, i) => {
+      const f = r[ix.pfraud] > 0.5, o = r[ix.ours_remain];
+      return '<circle cx="' + X(r[ix.turnout]) + '" cy="' + Y(r[ix.leader_share]) + '" r="' + (o ? 6 : 2.8) + '" fill="' + (f ? cssv("--flag") : cssv("--s1")) + '" fill-opacity="' + (o ? 1 : 0.5) + '" stroke="' + (o ? cssv("--ink") : "none") + '" stroke-width="' + (o ? 2 : 0) + '" data-i="' + i + '"/>';
+    }).join("");
+    el.innerHTML = '<svg viewBox="0 0 ' + w + " " + h + '" width="100%" role="img" aria-label="Turnout against leader share for ' + esc(st) + '">' + g + dots + '<text transform="translate(12 ' + (pad.t + (h - pad.t - pad.b) / 2) + ') rotate(-90)" text-anchor="middle">leader share of votes (' + esc(d.leader) + ")</text></svg>";
+    const svg = $("svg", el);
+    svg.onmousemove = (e) => { const c = e.target.closest("circle"); if (!c) return hideTip(); const r = rows[+c.dataset.i];
+      showTip("<b>" + esc(r[ix.precinct]) + "</b><br>" + esc(r[ix.county]) + "<br>turnout " + pct(r[ix.turnout]) + " · leader " + pct(r[ix.leader_share]) + "<br>eforensics P(fraud) " + r[ix.pfraud].toFixed(2) + " · \"fraudulent\" votes " + fmt(Math.round(r[ix.fraud_votes])) + "<br>Our checks: " + (r[ix.ours_remain] ? "<b>remains for review</b>" : r[ix.ours_screened] ? "screened, then ruled out" : "not unusual"), e); };
+    svg.onmouseleave = hideTip;
+  }
+
   /* ---------------------------------------------------------------- go */
-  let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if ((location.hash || "").startsWith("#/explore")) route(true); }, 200); });
+  let rt; addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(() => { if (/^#\/(explore|eforensics)/.test(location.hash || "")) route(true); }, 200); });
   init();
 })();

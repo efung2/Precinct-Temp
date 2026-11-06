@@ -231,6 +231,26 @@ def test_missing_columns_fail_clearly():
             raise AssertionError("expected SystemExit")
 
 
+def test_eforensics_smoke():
+    """The eforensics re-implementation runs end to end and returns valid probabilities (skipped without NumPyro)."""
+    try:
+        import numpyro  # noqa: F401
+    except ImportError:
+        print("      (skipped: numpyro not installed)")
+        return
+    import numpy as np
+    import eforensics as ef
+
+    rng = np.random.default_rng(4)
+    N = rng.integers(300, 2000, 150)
+    mu = dict(nu=0.2, tau=0.4, iM=-1.0, iS=-1.0, uM=0.0, uS=0.0)
+    sd = dict(nu=0.4, tau=0.3, iM=0.3, iS=0.3, uM=0.3, uS=0.3)
+    A, W, Z = ef.simulate(rng, N, np.array([0.9, 0.08, 0.02]), mu, sd)
+    s, post = ef.run_units(N, A, W, warmup=100, samples=50, chains=2, log=lambda *_: None)
+    assert np.all((post["pfraud"] >= 0) & (post["pfraud"] <= 1))
+    assert abs(sum(s["pi_mean"]) - 1) < 1e-6 and len(s["flag_05_by_chain"]) == 2
+
+
 if __name__ == "__main__":
     import traceback
 
