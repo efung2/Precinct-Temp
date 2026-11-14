@@ -165,8 +165,10 @@ def part_units(mode, units_all, ours_dir, out_dir, args, log, unit_files):
 # --------------------------------------------------------------------------- #
 # Head-to-head simulations
 # --------------------------------------------------------------------------- #
-def _our_pipeline_on(units, tmp, log):
-    """Run our full pipeline (no companion race) on a simulated unit table; return remain/screened arrays."""
+def _our_pipeline_on(units, tmp, log, with_turnout=False):
+    """Run our full pipeline (no companion race) on a simulated unit table; return remain/screened arrays.
+
+    with_turnout: also give the pipeline the number of eligible voters, which turns on its turnout check."""
     import run_pipeline
     rows = []
     for col, party in (("dem", "DEMOCRAT"), ("rep", "REPUBLICAN")):
@@ -175,6 +177,7 @@ def _our_pipeline_on(units, tmp, log):
             "mode": "TOTAL", "votes": units[col], "county_name": units["county_name"], "county_fips": units["county_fips"],
             "jurisdiction_fips": units["county_fips"], "candidate": party[:3] + " SIM", "district": "STATEWIDE",
             "stage": "GEN", "state": units["state"], "special": "FALSE", "writein": "FALSE", "state_po": units["state_po"],
+            **({"registered_voters": units["vap"]} if with_turnout else {}),
         }))
     csv = Path(tmp) / "sim.csv"
     pd.concat(rows).to_csv(csv, index=False)
@@ -184,8 +187,13 @@ def _our_pipeline_on(units, tmp, log):
     return (np.array([bool(x and x["remain"]) for x in o]), np.array([bool(x and x["screened"]) for x in o]))
 
 
-def part_sim(units_all, args, log):
-    """Simulated elections on a real state's precinct structure (sizes and counties)."""
+def part_sim(units_all, args, log, previous=None):
+    """Simulated elections on a real state's precinct structure (sizes and counties).
+
+    previous: the "sim" block of an earlier run. With --sim-reuse-eforensics the eforensics side of a
+    scenario is copied from it when the simulated election is identical (same seed, units and planted
+    precincts), so only our (fast) pipeline is re-run."""
+    prev = {s["key"]: s for s in (previous or {}).get("scenarios", [])}
     tmpl = units_all[units_all["state_po"] == args.sim_state].reset_index(drop=True)
     rng = np.random.default_rng(args.seed + 100)
     N = tmpl["vap"].to_numpy(int)
@@ -216,24 +224,34 @@ def part_sim(units_all, args, log):
         ok = (Vs > 0).to_numpy() if hasattr(Vs, "to_numpy") else Vs > 0
         u, Z = u[ok].reset_index(drop=True), Z[ok]
         log(f"    simulation [{key}]: {len(u):,} precincts, {int((Z > 0).sum())} with planted fraud")
-        s, post = ef.run_units(u["vap"].to_numpy(int), (u["vap"] - u["dem"] - u["rep"]).to_numpy(int),
-                               u["dem"].to_numpy(int), seed=args.seed + 7, warmup=args.warmup, samples=args.samples,
-                               chains=args.chains, log=log, label=f"sim {key}")
-        with tempfile.TemporaryDirectory() as tmp:
-            remain, screened = _our_pipeline_on(u, tmp, lambda *_: None)
         truth = Z > 0
-        f05, f09 = post["pfraud"] > 0.5, post["pfraud"] > 0.9
+        old = prev.get(key)
+        if args.sim_reuse_eforensics and old and old["units"] == len(u) and old["planted"] == int(truth.sum()):
+            efr = old["eforensics"]
+            log("      eforensics result reused from the previous run (identical simulated election)")
+        else:
+            s, post = ef.run_units(u["vap"].to_numpy(int), (u["vap"] - u["dem"] - u["rep"]).to_numpy(int),
+                                   u["dem"].to_numpy(int), seed=args.seed + 7, warmup=args.warmup, samples=args.samples,
+                                   chains=args.chains, log=log, label=f"sim {key}")
+            f05, f09 = post["pfraud"] > 0.5, post["pfraud"] > 0.9
+            efr = {"flag_05": int(f05.sum()), "flag_09": int(f09.sum()),
+                   "false_05": int((f05 & ~truth).sum()), "false_09": int((f09 & ~truth).sum()),
+                   "caught_05": int((f05 & truth).sum()), "caught_09": int((f09 & truth).sum()),
+                   "pi_mean": s["pi_mean"], "pi_by_chain": s["pi_by_chain"], "converged": s["converged"],
+                   "rhat_pi": s["rhat_pi"], "flag_05_by_chain": s["flag_05_by_chain"]}
+        ours = {}
+        for name, wt in (("ours", False), ("ours_turnout", True)):
+            with tempfile.TemporaryDirectory() as tmp:
+                remain, screened = _our_pipeline_on(u, tmp, lambda *_: None, with_turnout=wt)
+            ours[name] = {"screened": int(screened.sum()), "remain": int(remain.sum()),
+                          "false_remain": int((remain & ~truth).sum()), "caught_remain": int((remain & truth).sum()),
+                          "caught_screened": int((screened & truth).sum())}
         res = {"key": key, "description": desc, "units": int(len(u)), "planted": int(truth.sum()),
-               "eforensics": {"flag_05": int(f05.sum()), "flag_09": int(f09.sum()),
-                              "false_05": int((f05 & ~truth).sum()), "false_09": int((f09 & ~truth).sum()),
-                              "caught_05": int((f05 & truth).sum()), "caught_09": int((f09 & truth).sum()),
-                              "pi_mean": s["pi_mean"], "pi_by_chain": s["pi_by_chain"], "converged": s["converged"],
-                              "rhat_pi": s["rhat_pi"], "flag_05_by_chain": s["flag_05_by_chain"]},
-               "ours": {"screened": int(screened.sum()), "remain": int(remain.sum()),
-                        "false_remain": int((remain & ~truth).sum()), "caught_remain": int((remain & truth).sum()),
-                        "caught_screened": int((screened & truth).sum())}}
-        log(f"      -> eforensics flags {res['eforensics']['flag_05']} (false {res['eforensics']['false_05']}), "
-            f"ours remain {res['ours']['remain']} (false {res['ours']['false_remain']})")
+               "eforensics": efr, **ours}
+        log(f"      -> eforensics flags {efr['flag_05']} (false {efr['false_05']}); ours remain {ours['ours']['remain']} "
+            f"(false {ours['ours']['false_remain']}, caught {ours['ours']['caught_remain']}); with turnout check remain "
+            f"{ours['ours_turnout']['remain']} (false {ours['ours_turnout']['false_remain']}, "
+            f"caught {ours['ours_turnout']['caught_remain']})")
         out["scenarios"].append(res)
     return out
 
@@ -254,6 +272,8 @@ def main(argv=None):
     ap.add_argument("--chains", type=int, default=4)
     ap.add_argument("--seed", type=int, default=2020)
     ap.add_argument("--resume", action="store_true", help="reuse cached per-state results")
+    ap.add_argument("--sim-reuse-eforensics", action="store_true",
+                    help="sim part: keep the eforensics results already in comparison.json and re-run only our pipeline")
     args = ap.parse_args(argv)
     args.only_states = {s.strip().upper() for s in args.only_states.split(",")} if args.only_states else None
     t0 = time.time()
@@ -293,7 +313,7 @@ def main(argv=None):
         result["real"] = res
     if "sim" in args.parts:
         log(f"head-to-head simulations on {args.sim_state}'s precinct structure")
-        result["sim"] = part_sim(units, args, log)
+        result["sim"] = part_sim(units, args, log, previous=result.get("sim"))
     _dump(result, path)
     log(f"done: {path}")
     return 0

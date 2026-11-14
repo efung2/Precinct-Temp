@@ -1,3 +1,4 @@
 numpy>=1.26
 pandas>=2.1
 scipy>=1.11
+zipcodes>=1.2

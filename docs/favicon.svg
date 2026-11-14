@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>Precinct Review</title>
+  <rect width="32" height="32" rx="7" fill="#2a78d6"/>
+  <rect x="5" y="17" width="22" height="10.5" rx="2.2" fill="#fff"/>
+  <rect x="7.5" y="15.6" width="17" height="2.8" rx="1.4" fill="#12325c"/>
+  <rect x="10.5" y="4.5" width="11" height="12.4" rx="1.4" fill="#fff"/>
+  <path d="M13 10.4l2.3 2.4 4-4.5" fill="none" stroke="#eb6834" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

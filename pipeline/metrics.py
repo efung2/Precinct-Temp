@@ -5,6 +5,7 @@ Every metric is a proportion with a denominator:
     share   = Democratic votes / (Democratic + Republican votes)
     under   = under-votes / ballots
     mode    = early + absentee + provisional votes / all votes   (only where reported)
+    turnout = votes cast in the race / registered voters         (only where registration is supplied)
 
 For each precinct we ask: "how unusual is this proportion compared with the
 other precincts in the same county (or district, if the county is too small),
@@ -160,7 +161,7 @@ def is_flagged(z, support, thr):
 
 # --------------------------------------------------------------------------- #
 def metric_inputs(p):
-    """Numerators, denominators and masks for the three metrics."""
+    """Numerators, denominators and masks for the metrics."""
     base = (p["status"] == "two_party") & ~p["nongeo"] & ~p["zero_votes"]
     inputs = {
         "share": dict(
@@ -177,6 +178,13 @@ def metric_inputs(p):
             num=p["v_non"].to_numpy(),
             den=(p["v_ed"] + p["v_non"]).to_numpy(),
             mask=(base & p["mode_split"] & ((p["v_ed"] + p["v_non"]) >= config.MIN_DEN)).to_numpy(),
+        ),
+        # Precincts with more votes than registered voters are not compared (the two numbers do not
+        # describe the same place: usually a split precinct or a registration-file error); they get dq code "V".
+        "turnout": dict(
+            num=p["ballots"].to_numpy(),
+            den=p["registered"].to_numpy(),
+            mask=(base & p["reg_reported"] & (p["registered"] >= config.MIN_DEN) & ~p["over_registered"]).to_numpy(),
         ),
     }
     return inputs
@@ -215,6 +223,7 @@ def analyze(p, z_flag=None):
     letters = np.where(flagged["share"], "S", "")
     letters = np.char.add(letters, np.where(flagged["under"], "U", ""))
     letters = np.char.add(letters, np.where(flagged["mode"], "M", ""))
+    letters = np.char.add(letters, np.where(flagged["turnout"], "R", ""))
     p["flags"] = letters
 
     dq = np.where(p["zero_votes"], "Z", "")
@@ -222,5 +231,6 @@ def analyze(p, z_flag=None):
     dq = np.char.add(dq, np.where((p["status"] == "two_party") & (p["two_party"] < config.MIN_DEN), "T", ""))
     dq = np.char.add(dq, np.where(p["dup_vector"], "D", ""))
     dq = np.char.add(dq, np.where(clustered, "C", ""))
+    dq = np.char.add(dq, np.where(p["over_registered"], "V", ""))
     p["dq"] = dq
     return p, fits

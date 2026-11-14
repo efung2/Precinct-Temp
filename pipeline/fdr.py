@@ -108,12 +108,17 @@ def empirical_null(z, min_n=None):
     if sel.sum() < 3:
         sel = (np.abs(centers - np.median(zs)) <= 1.0) & (f > 0)
     c2, c1, c0 = np.polyfit(centers[sel], np.log(f[sel]), 2)
+    med, iqr_sd = float(np.median(zs)), float((q75 - q25) / 1.349)
     if c2 >= 0:
-        mu0, sigma0, pi0 = float(np.median(zs)), float((q75 - q25) / 1.349), 1.0
+        mu0, sigma0, pi0 = med, iqr_sd, 1.0
     else:
         sigma0 = float(np.sqrt(-1.0 / (2 * c2)))
         mu0 = float(c1 * sigma0**2)
         pi0 = float(min(1.0, np.exp(c0 + np.log(np.sqrt(2 * np.pi) * sigma0) + mu0**2 / (2 * sigma0**2))))
+        # A nearly flat fit (strongly skewed or flat-topped bulk) gives a null far from the data
+        # itself. That is a failed fit, not a finding: fall back to the median and quartile spread.
+        if sigma0 > 4 * iqr_sd or abs(mu0 - med) > 2 * iqr_sd:
+            mu0, sigma0, pi0 = med, iqr_sd, 1.0
     info.update(method="empirical null (Efron central matching)", mu0=mu0,
                 sigma0_fitted=sigma0, sigma0=max(sigma0, 1.0), pi0=pi0,
                 _centers=centers, _f=f)

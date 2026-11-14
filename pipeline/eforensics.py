@@ -17,9 +17,12 @@ package eforensics (Ferrari, McAlister & Mebane 2018; Mebane 2019):
   A_i ~ Binomial(N_i, E(a_i)),  W_i ~ Binomial(N_i, E(w_i))
 
 Differences from the R/JAGS package, stated plainly:
-  * Intercept-only (no covariates), as in the default qbl call.
+  * Intercept-only by default, as in the default qbl call. Optionally (X, groups) covariates and
+    area effects enter the turnout and vote-choice equations, as in Mebane's fixed-effects
+    specifications: tau_i = logistic(gamma + x_i'g + a_area(i) + kappa_tau_i), likewise nu_i.
+    Covariates are not put in the fraud-magnitude equations.
   * The constant term and the random-effect mean are one parameter here (they are not
-    separately identified when there are no covariates).
+    separately identified).
   * Z_i is summed out of the likelihood (exact) so that the No-U-Turn sampler can be used;
     the posterior probability of each class is recovered afterwards for every draw.
   * Convergence is judged with split R-hat and effective sample size rather than MCMCSE
@@ -63,7 +66,11 @@ def _probs(jnp, jax, lin):
     return nu, tau, jnp.clip(a, 1e-7, 1 - 1e-7), jnp.clip(w, 1e-7, 1 - 1e-7)
 
 
-def _model(N, A, W):
+COVARIATE_PARTS = ("nu", "tau")  # equations that take covariates / area effects
+AREA_PRIOR_SD = 3.0               # wide: area effects behave like fixed effects
+
+
+def _model(N, A, W, X=None, G=None, n_groups=0):
     jax, jnp, numpyro, dist, *_ = _lazy()
     n = N.shape[0]
     t1 = numpyro.sample("pt1", dist.Uniform(0, 1))
@@ -78,14 +85,26 @@ def _model(N, A, W):
         with numpyro.plate(f"units_{c}", n):
             e = numpyro.sample(f"e_{c}", dist.Normal(0, 1))
         lin[c] = mu + sd * e
+        if c in COVARIATE_PARTS:
+            if X is not None:
+                with numpyro.plate(f"covs_{c}", X.shape[1]):
+                    b = numpyro.sample(f"b_{c}", dist.Normal(0, 1))
+                lin[c] = lin[c] + X @ b
+            if G is not None:
+                with numpyro.plate(f"areas_{c}", n_groups):
+                    g = numpyro.sample(f"g_{c}", dist.Normal(0, AREA_PRIOR_SD))
+                lin[c] = lin[c] + g[G]
     _, _, a, w = _probs(jnp, jax, lin)
     ll = dist.Binomial(N[:, None], probs=a).log_prob(A[:, None]) + \
         dist.Binomial(N[:, None], probs=w).log_prob(W[:, None])
     numpyro.factor("lik", jax.scipy.special.logsumexp(jnp.log(pi) + ll, axis=-1).sum())
 
 
-def fit(N, A, W, seed=0, warmup=400, samples=250, chains=4, max_tree_depth=7):
-    """Run NUTS. Returns dict with posterior draws needed downstream and diagnostics."""
+def fit(N, A, W, seed=0, warmup=400, samples=250, chains=4, max_tree_depth=7, X=None, groups=None):
+    """Run NUTS. Returns dict with posterior draws needed downstream and diagnostics.
+
+    X      : optional (units x covariates) array, already standardised, for turnout and vote choice
+    groups : optional integer area index per unit (0..n_groups-1) for area effects in both equations"""
     jax, jnp, numpyro, dist, MCMC, NUTS, init_to_value = _lazy()
     from numpyro.diagnostics import summary
     n = len(N)
@@ -95,15 +114,25 @@ def fit(N, A, W, seed=0, warmup=400, samples=250, chains=4, max_tree_depth=7):
         init[f"mu_{c}"] = 0.0
         init[f"sd_{c}"] = 0.3
         init[f"e_{c}"] = np.zeros(n)
+    n_groups = int(np.max(groups)) + 1 if groups is not None else 0
+    for c in COVARIATE_PARTS:
+        if X is not None:
+            init[f"b_{c}"] = np.zeros(X.shape[1])
+        if groups is not None:
+            init[f"g_{c}"] = np.zeros(n_groups)
+    Xj = None if X is None else jnp.asarray(X, float)
+    Gj = None if groups is None else jnp.asarray(groups, int)
     t = time.time()
     mcmc = MCMC(NUTS(_model, target_accept_prob=0.85, max_tree_depth=max_tree_depth,
                      init_strategy=init_to_value(values=init)),
                 num_warmup=warmup, num_samples=samples, num_chains=chains,
                 chain_method="parallel" if chains <= len(jax.devices()) else "sequential", progress_bar=False)
-    mcmc.run(jax.random.PRNGKey(seed), jnp.asarray(N, float), jnp.asarray(A, float), jnp.asarray(W, float))
+    mcmc.run(jax.random.PRNGKey(seed), jnp.asarray(N, float), jnp.asarray(A, float), jnp.asarray(W, float),
+             Xj, Gj, n_groups)
     s = mcmc.get_samples()
     by_chain = mcmc.get_samples(group_by_chain=True)
     keep = ["pi"] + [f"mu_{c}" for c in COMPONENTS] + [f"sd_{c}" for c in COMPONENTS]
+    keep += [f"b_{c}" for c in COVARIATE_PARTS if X is not None]
     sm = summary({k: by_chain[k] for k in keep})
     rhat = {k: np.atleast_1d(np.asarray(v["r_hat"])).tolist() for k, v in sm.items()}
     ess = {k: np.atleast_1d(np.asarray(v["n_eff"])).tolist() for k, v in sm.items()}
@@ -113,7 +142,7 @@ def fit(N, A, W, seed=0, warmup=400, samples=250, chains=4, max_tree_depth=7):
             "settings": {"warmup": warmup, "samples": samples, "chains": chains}}
 
 
-def unit_posteriors(res, N, A, W, chunk=200):
+def unit_posteriors(res, N, A, W, chunk=200, X=None, groups=None):
     """Per-unit class probabilities and fraudulent-vote estimates, averaged over posterior draws."""
     jax, jnp, numpyro, dist, *_ = _lazy()
     s = res["samples"]
@@ -128,6 +157,11 @@ def unit_posteriors(res, N, A, W, chunk=200):
     for lo in range(0, D, chunk):
         hi = min(D, lo + chunk)
         lin = {c: s[f"mu_{c}"][lo:hi, None] + s[f"sd_{c}"][lo:hi, None] * s[f"e_{c}"][lo:hi] for c in COMPONENTS}
+        for c in COVARIATE_PARTS:
+            if X is not None:
+                lin[c] = lin[c] + s[f"b_{c}"][lo:hi] @ np.asarray(X, float).T
+            if groups is not None:
+                lin[c] = lin[c] + s[f"g_{c}"][lo:hi][:, np.asarray(groups, int)]
         lin = {c: jnp.asarray(v) for c, v in lin.items()}
         nu, tau, a, w = _probs(jnp, jax, lin)
         ll = dist.Binomial(Nj[None, :, None], probs=a).log_prob(Aj[None, :, None]) + \
@@ -160,7 +194,7 @@ def _chain_slice(res, c):
     return {"samples": {k: v[c * S:(c + 1) * S] for k, v in res["samples"].items()}}
 
 
-def run_units(N, A, W, seed=0, warmup=400, samples=250, chains=4, log=print, label=""):
+def run_units(N, A, W, seed=0, warmup=400, samples=250, chains=4, log=print, label="", X=None, groups=None):
     """Fit with several chains and report BOTH the pooled posterior and each chain separately.
 
     The qbl posterior is often multimodal: an "incremental fraud" class with a very small fraud
@@ -168,8 +202,8 @@ def run_units(N, A, W, seed=0, warmup=400, samples=250, chains=4, log=print, lab
     that happens (pi R-hat > 1.1) the state is marked not converged and the spread of results
     across chains is reported, instead of picking one chain.
     """
-    res = fit(N, A, W, seed, warmup, samples, chains)
-    per = [unit_posteriors(_chain_slice(res, c), N, A, W) for c in range(chains)]
+    res = fit(N, A, W, seed, warmup, samples, chains, X=X, groups=groups)
+    per = [unit_posteriors(_chain_slice(res, c), N, A, W, X=X, groups=groups) for c in range(chains)]
     post = {k: np.mean([p_[k] for p_ in per], axis=0) for k in ("p2", "p3", "pfraud", "fraud_votes", "fraud_turnout")}
     post["fraud_votes_total_draws"] = np.concatenate([p_["fraud_votes_total_draws"] for p_ in per])
     pi = res["samples"]["pi"]
@@ -195,6 +229,10 @@ def run_units(N, A, W, seed=0, warmup=400, samples=250, chains=4, log=print, lab
         "fraud_votes_hi": float(np.quantile(post["fraud_votes_total_draws"], 0.975)),
         "fraud_votes_by_chain": [float(p_["fraud_votes_total_draws"].mean()) for p_ in per],
         "leader_votes": int(np.sum(W)),
+        "coef": {c: {"mean": res["samples"][f"b_{c}"].mean(0).tolist(),
+                     "lo": np.quantile(res["samples"][f"b_{c}"], 0.025, axis=0).tolist(),
+                     "hi": np.quantile(res["samples"][f"b_{c}"], 0.975, axis=0).tolist(),
+                     "rhat": res["rhat"][f"b_{c}"]} for c in COVARIATE_PARTS} if X is not None else None,
         "iota_M_by_chain": [float(np.median(K / (1 + np.exp(-res["samples"]["mu_iM"][c * S:(c + 1) * S]))))
                             for c in range(chains)],
     }

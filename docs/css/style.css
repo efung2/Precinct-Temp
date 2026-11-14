@@ -40,6 +40,7 @@ code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; background: 
 .top-in { display: flex; align-items: center; gap: 20px; height: 54px; }
 .brand { display: flex; align-items: center; gap: 9px; font-weight: 650; color: var(--ink); text-decoration: none; letter-spacing: -0.01em; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--s1); box-shadow: 0 0 0 3px var(--s1-soft); }
+.brand .logo { display: block; border-radius: 5px; }
 nav { display: flex; gap: 4px; flex: 1; overflow-x: auto; }
 nav a { color: var(--ink2); text-decoration: none; padding: 6px 11px; border-radius: 8px; font-size: 14px; white-space: nowrap; }
 nav a:hover { background: var(--s1-soft); }
@@ -118,3 +119,21 @@ table.mini td { padding: 4px 8px; border-bottom: 1px solid var(--grid); white-sp
 table.mini td:first-child { color: var(--ink3); width: 130px; }
 .why-body h3 { margin: 10px 0 2px; color: var(--ink); }
 details.panel summary { cursor: pointer; }
+
+/* ---- PA 2024 study page */
+.foot ul { margin: 4px 0 0; padding-left: 18px; }
+.foot li { margin: 3px 0; }
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; margin: 10px 0 2px; }
+.kv > div { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.kv .k { font-size: 12.5px; color: var(--ink2); }
+.kv .v { font-size: 22px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+.kv .n { font-size: 12.5px; color: var(--ink3); }
+.vs { display: grid; gap: 8px; margin: 10px 0 4px; }
+.vs .fr { grid-template-columns: minmax(170px, 36%) 1fr 96px; }
+td.wrap-ok, th.wrap-ok { white-space: normal; min-width: 180px; }
+.badge.h { background: var(--s1-soft); color: var(--s1); }
+.legend i.sq { border-radius: 2px; }
+.legend i.tri { width: 0; height: 0; border-radius: 0; background: transparent !important; border-left: 5px solid transparent; border-right: 5px solid transparent; border-bottom: 9px solid var(--ink); }
+ul.tight { margin: 4px 0 8px; padding-left: 20px; }
+ul.tight li { margin: 4px 0; }
+table.compact th, table.compact td { padding: 7px 8px; }

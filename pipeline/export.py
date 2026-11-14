@@ -26,10 +26,11 @@ FIELDS = [
     "share", "share_peer", "share_z", "share_q", "share_enq", "share_v",
     "under_rate", "under_peer", "under_z", "under_q", "under_enq", "under_v",
     "mode_share", "mode_peer", "mode_z", "mode_q", "mode_enq", "mode_v",
+    "registered", "turnout", "turnout_peer", "turnout_z", "turnout_q", "turnout_enq", "turnout_v",
     "comp_share", "cross_gap", "cross_peer", "cross_z", "cross_q", "cross_enq", "cross_v", "cross_status",
     "flags", "screened", "remain", "dq",
 ]
-METRICS = ("share", "under", "mode")
+METRICS = ("share", "under", "mode", "turnout")
 CROSS_CODE = {"matched": "M", "matched_by_name": "M", "split": "S", "unmatched": "U", "n/a": ""}
 
 
@@ -98,6 +99,12 @@ def _rows(g):
             "mode_z": g["mode_z"].round(2).to_numpy(),
             "mode_q": _sig(g["mode_q"]), "mode_enq": g["mode_enq"].round(3).to_numpy(),
             "mode_v": g["mode_v"].to_numpy(),
+            "registered": np.where(g["reg_reported"], g["registered"], np.nan),
+            "turnout": g["turnout_p"].round(4).to_numpy(),
+            "turnout_peer": g["turnout_peer"].round(4).to_numpy(),
+            "turnout_z": g["turnout_z"].round(2).to_numpy(),
+            "turnout_q": _sig(g["turnout_q"]), "turnout_enq": g["turnout_enq"].round(3).to_numpy(),
+            "turnout_v": g["turnout_v"].to_numpy(),
             "comp_share": pd.to_numeric(g["comp_share"], errors="coerce").round(4).to_numpy(),
             "cross_gap": pd.to_numeric(g["cross_gap"], errors="coerce").round(4).to_numpy(),
             "cross_peer": pd.to_numeric(g["cross_peer"], errors="coerce").round(4).to_numpy(),
@@ -240,8 +247,8 @@ def export_dataset(p, contests, state_names, calib, stats, out_root, dataset_id,
             hit = g[g["screened"] != ""]
             if len(hit):
                 ev = np.nanmax(np.vstack([np.abs(pd.to_numeric(hit[c_], errors="coerce").to_numpy(float))
-                                          for c_ in ("share_z", "under_z", "mode_z", "cross_z",
-                                                     "share_hbz", "under_hbz", "mode_hbz")]), axis=0)
+                                          for c_ in ("share_z", "under_z", "mode_z", "turnout_z", "cross_z",
+                                                     "share_hbz", "under_hbz", "mode_hbz", "turnout_hbz")]), axis=0)
                 q = pd.DataFrame(
                     {
                         "state": st,
@@ -254,12 +261,15 @@ def export_dataset(p, contests, state_names, calib, stats, out_root, dataset_id,
                         "share_v": hit["share_v"].to_numpy(),
                         "under_v": hit["under_v"].to_numpy(),
                         "mode_v": hit["mode_v"].to_numpy(),
+                        "turnout_v": hit["turnout_v"].to_numpy(),
                         "cross_v": hit["cross_v"].to_numpy(),
                         "evidence": np.round(np.nan_to_num(ev, nan=0.0), 2),
                         "two_party": hit["two_party"].to_numpy(),
                         "share": hit["share_p"].round(4).to_numpy(),
                         "share_peer": hit["share_peer"].round(4).to_numpy(),
                         "comp_share": pd.to_numeric(hit["comp_share"], errors="coerce").round(4).to_numpy(),
+                        "turnout": np.where(hit["turnout_v"] != "", hit["turnout_p"].round(4), np.nan),
+                        "turnout_peer": np.where(hit["turnout_v"] != "", hit["turnout_peer"].round(4), np.nan),
                     }
                 )
                 queue_parts.append(q)
@@ -310,6 +320,7 @@ def export_dataset(p, contests, state_names, calib, stats, out_root, dataset_id,
         "generated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "params": params,
         "has_cross": has_cross,
+        "has_turnout": bool(p["reg_reported"].any()),
         "cross": cross_info,
         "enull_info": enull_info,
         "totals": {

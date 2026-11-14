@@ -3,7 +3,8 @@
 Screens precinct-level election results for precincts that are unusual **compared with comparable precincts**, then runs every screened precinct through independent cross-checks. Only precincts that survive every check are listed for human review. A listed precinct is a lead to check against official records, never a finding of fraud.
 
 ```
-raw/                 your MEDSL CSVs (not committed to GitHub)
+raw/                 your downloaded data files (not committed to GitHub)
+raw/pa-2024/         Pennsylvania 2024 files (section 6)
 pipeline/            Python: clean -> score -> cross-check -> calibrate -> export JSON
 docs/                the website (served by GitHub Pages)
 docs/data/           pipeline output; the site reads only this
@@ -21,7 +22,7 @@ tests/               tests (run: python3 tests/test_pipeline.py)
 | Clusters | more similar precincts nearby than chance allows | rules out (`C`) |
 | Cross-race | same precinct, another race on the same ballot (needs a companion file) | rules out (`L`) when both races show the same pattern; raises a gap signal (`X`) when they differ |
 
-Signals: vote share (`S`), under-votes (`U`), voting mode (`M`), cross-race gap (`X`). Settings are in `pipeline/config.py`.
+Signals: vote share (`S`), under-votes (`U`), voting mode (`M`), turnout (`R`, only when the file has a `registered_voters` column), cross-race gap (`X`). Settings are in `pipeline/config.py`.
 
 ## 1. One-time setup
 
@@ -30,8 +31,8 @@ Needs Python 3.10+. Use the command `python3` (plain `python` is Python 2 on som
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt    # numpy, pandas, scipy
-python3 tests/test_pipeline.py     # should print six PASS lines
+pip install -r requirements.txt    # numpy, pandas, scipy, zipcodes
+python3 tests/test_pipeline.py     # should print eight PASS lines
 ```
 
 If you already had a `.venv` from before, run the `pip install` line again: SciPy is new.
@@ -132,7 +133,74 @@ The website uses a Python re-implementation of eforensics. To check it against t
 
 The R package's argument conventions can differ between versions; lines that may need adjusting are marked `# <- check` in the script.
 
+## 6. Pennsylvania 2024 (the "PA 2024" tab and the "PA 2024 study" page)
+
+Tests the project hypothesis on the 2024 presidential election in Pennsylvania: turnout check,
+precinct history, campaign activity, and a comparison with Mebane's published eforensics analysis.
+
+Files, all free, kept in `raw/pa-2024/` under exactly these names:
+
+| File | What it is | Where it comes from |
+|---|---|---|
+| `pa2024_general_returns.txt` | 2024 General "Election Returns Precinct Data" | PA Department of State, [Election Data](https://www.pa.gov/agencies/dos/resources/voting-and-elections-resources/voting-and-election-statistics/election-data.html) |
+| `pa2024_voter_registration.txt` | 2024 General "Voter Registration Precinct Data" | same page |
+| `pa2024_vr_readme.txt` | column layout for the registration file | same page |
+| `pa_vtd_2020.zip` | Census 2020 voting districts, Pennsylvania (`tl_2020_42_vtd20.zip`) | U.S. Census Bureau TIGER/Line |
+| `oppexp24.zip`, `oppexp_header_file.csv` | FEC operating expenditures 2023-24 and column names | [FEC bulk data](https://www.fec.gov/data/browse-data/?tab=bulk-data) |
+| `cm24.zip` | FEC committee master file 2023-24 | same page |
+
+It also uses `raw/census-vest-2020/pa_2020_vtd.csv` (the ALARM file from section 5).
+
+```bash
+pip install -r requirements.txt                 # adds the small "zipcodes" package
+pip install -r requirements-eforensics.txt      # only for step 4
+
+# 1. state files -> one row per precinct (merges precincts split by district lines)
+python3 pipeline/pa_convert.py
+
+# 2. location, 2020 history and campaign-event exposure for every precinct
+python3 pipeline/pa_features.py
+
+# 3. the "PA 2024" tab: President, with U.S. Senate as the cross-race companion and the turnout check
+python3 pipeline/run_pipeline.py \
+  --input raw/pa-2024/pa-2024-president.csv \
+  --companion raw/pa-2024/pa-2024-senate.csv \
+  --dataset-id pa-2024 \
+  --label "Pennsylvania 2024 - President (with turnout)" \
+  --short-label "PA 2024"
+
+# 4. optional: our eforensics re-implementation, five specifications (about 20 minutes; cached)
+python3 pipeline/pa_eforensics.py
+
+# 5. the "PA 2024 study" page
+python3 pipeline/pa_study.py
+```
+
+Each step prints what it did; steps 1 and 2 also write a report (`pa-2024-build-report.json`,
+`pa-2024-features-report.json`) and the list of campaign venues (`pa-2024-events.csv`) to `raw/pa-2024/`.
+Step 5 works without step 4 (the eforensics re-run table is then left out).
+
+What the study page reports and why:
+
+- **Turnout** = votes for President / registered voters. Precincts that report more votes than
+  registered voters are set aside. Nearly all such cases in the raw state file are pieces of split
+  precincts, which `pa_convert.py` merges.
+- **History check** and **campaign check**: extra rule-out checks used only in this study. A precinct
+  on the review list is explained when its z-score drops below 3 once its 2020 result, 2020 turnout,
+  population make-up and party registration (history), and then nearby campaign events (campaign), are in the model.
+- **Campaign activity** = venue rentals for events by the presidential campaigns and national party
+  committees in FEC records, located by ZIP code. Field offices, canvassing and advertising cannot be
+  located from these files.
+- **"Votes above expectation"** = votes for the statewide leader above what the model expects, summed
+  over the precincts that remain. This is the closest analogue in our approach to eforensics' "fraudulent votes".
+
 ## Data sources and citations
+
+- Pennsylvania Department of State. 2024 General Election, Election Returns Precinct Data (extracted January 2025) and Voter Registration Precinct Data (extracted December 23, 2024). https://www.pa.gov/agencies/dos/resources/voting-and-elections-resources/voting-and-election-statistics/election-data.html
+- Federal Election Commission. Bulk data, 2023-2024 election cycle: Operating Expenditures (`oppexp24`) and Committee Master (`cm24`). https://www.fec.gov/data/browse-data/?tab=bulk-data
+- U.S. Census Bureau. 2020 TIGER/Line Shapefiles: Voting Districts, Pennsylvania (`tl_2020_42_vtd20`).
+- Mebane, Walter R., Jr. 2025. "eforensics Analysis of the 2024 President Election in Pennsylvania." Version of June 2, 2025. University of Michigan. (Precinct data in that paper: Lilli McGregor, Election Truth Alliance.)
+- ZIP-code locations: the open-source `zipcodes` Python package.
 
 - MIT Election Data and Science Lab (MEDSL). U.S. House precinct-level returns 2018; U.S. Senate precinct-level returns 2018 and 2020. Harvard Dataverse. https://electionlab.mit.edu/data
 - Kenny, Christopher T., and Cory McCartan. ALARM Project, census-2020 (2020 Census data by voting district, with election results). CC BY-SA 4.0. https://github.com/alarm-redist/census-2020
@@ -143,8 +211,9 @@ The R package's argument conventions can differ between versions; lines that may
 ## Known limits (also on the site)
 
 - Clean elections for calibration are simulated from the pipeline's own model: this checks each step is calibrated, not that real precincts behave like the model.
-- Single-precinct shifts are hard to detect (about 20% for a 30-point shift). A short list is not proof that nothing happened.
+- Single-precinct shifts are hard to detect (about 20% for a 30-point shift in vote share; about 50% for a 30-point shift in turnout in the PA 2024 data). A short list is not proof that nothing happened.
 - Races with fewer than 10 assessable precincts are not assessed. Contests with only one major party, or two candidates from the same party, are skipped.
 - Precinct names must match across the two files for the cross-race check; the site reports the match rate. Precincts split between districts are skipped.
-- No turnout metric in our checks (no registration counts in MEDSL files). Census covariates and spatial checks are not included yet.
+- The turnout check runs only where registration counts are supplied (PA 2024). MEDSL files have none. Spatial-neighbour checks are not included.
+- PA 2024 campaign activity covers rented event venues only; precinct history comes from 2020 voting districts, so precincts redrawn since 2020 have none.
 - The eforensics comparison uses a Python re-implementation and census voting-age population as "eligible voters" (includes non-citizens). See the eforensics tab for its caveats.

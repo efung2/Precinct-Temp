@@ -37,7 +37,7 @@ Z_THRESHOLDS_REPORTED = (3.0, 3.5, 4.0, 4.5, 5.0)
 
 # Floor on the between-precinct spread (absolute units, 0-1 scale). Stops the
 # model from becoming over-confident in very uniform peer groups.
-TAU_MIN = {"share": 0.03, "under": 0.004, "mode": 0.03}
+TAU_MIN = {"share": 0.03, "under": 0.004, "mode": 0.03, "turnout": 0.03}
 
 # ---- Data-quality checks ----------------------------------------------------
 # Two precincts with identical vote vectors are only noted if they are at least
@@ -94,5 +94,7 @@ CROSS_TAU_MIN = 0.02       # floor on between-precinct spread of the gap
 CROSS_EXPLAIN_Z = 3.0      # |gap z| below this = the other race shows the same pattern ("explained")
 
 # ---- Full-chain calibration -------------------------------------------------
-CHAIN_REPS = 4             # simulated clean elections pushed through every check
+CHAIN_REPS = 4             # simulated clean elections pushed through every check (minimum)
+CHAIN_TARGET_DRAWS = 200_000  # small datasets get more repetitions, up to CHAIN_MAX_REPS
+CHAIN_MAX_REPS = 20
 TAIL_CAL_REPS = 4          # simulations used to calibrate the hierarchical p-value tails (checks.tail_calibration)

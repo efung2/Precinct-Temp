@@ -5,17 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Precinct Review</title>
 <meta name="description" content="Peer-relative anomaly screening for precinct-level election results. Flags are prompts for human review, not findings of fraud.">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 <header class="top">
   <div class="wrap top-in">
-    <a class="brand" href="#/overview"><span class="dot"></span>Precinct Review</a>
+    <a class="brand" href="#/overview"><img class="logo" src="favicon.svg" width="22" height="22" alt="">Precinct Review</a>
     <nav id="nav" aria-label="Sections">
       <a href="#/overview" data-r="overview">Overview</a>
       <a href="#/explore" data-r="explore">Explore</a>
       <a href="#/reliability" data-r="reliability">Reliability</a>
       <a href="#/eforensics" data-r="eforensics">eforensics</a>
+      <a href="#/pa2024" data-r="pa2024">PA 2024 study</a>
       <a href="#/method" data-r="method">Method</a>
     </nav>
     <button id="theme" class="ghost" aria-label="Toggle light or dark theme">Theme</button>
@@ -29,7 +33,15 @@
 
 <footer class="wrap foot">
   <p>"Unusual" means unusual relative to comparable precincts. Listed precincts are leads for checking against official records, not evidence of fraud or error.</p>
-  <p><b>Data sources.</b> Precinct returns: MIT Election Data and Science Lab (MEDSL), U.S. House precinct-level returns 2018 and U.S. Senate precinct-level returns 2018 and 2020, Harvard Dataverse. Census voting districts: Christopher T. Kenny and Cory McCartan, ALARM Project, <a href="https://github.com/alarm-redist/census-2020">census-2020</a> (CC BY-SA 4.0), built from U.S. Census Bureau 2020 P.L. 94-171 redistricting data and election results from the Voting and Election Science Team (VEST), Harvard Dataverse. eforensics model: Walter R. Mebane Jr., University of Michigan (eforensics R package; Ferrari, McAlister and Mebane 2018).</p>
+  <p><b>Data sources.</b></p>
+  <ul>
+    <li><b>Precinct returns, 2018 and 2020:</b> MIT Election Data and Science Lab (MEDSL), U.S. House precinct-level returns 2018 and U.S. Senate precinct-level returns 2018 and 2020, Harvard Dataverse.</li>
+    <li><b>Census voting districts, 2020:</b> Christopher T. Kenny and Cory McCartan, ALARM Project, <a href="https://github.com/alarm-redist/census-2020">census-2020</a> (CC BY-SA 4.0), built from U.S. Census Bureau 2020 P.L. 94-171 redistricting data and election results from the Voting and Election Science Team (VEST), Harvard Dataverse.</li>
+    <li><b>Pennsylvania 2024 returns and registration:</b> Pennsylvania Department of State, <a href="https://www.pa.gov/agencies/dos/resources/voting-and-elections-resources/voting-and-election-statistics/election-data.html">Election Data</a>: 2024 General Election "Election Returns Precinct Data" (extracted January 2025) and "Voter Registration Precinct Data" (extracted December 23, 2024).</li>
+    <li><b>Precinct locations:</b> U.S. Census Bureau, 2020 TIGER/Line Shapefiles, Voting Districts, Pennsylvania (<code>tl_2020_42_vtd20</code>).</li>
+    <li><b>Campaign activity:</b> Federal Election Commission, bulk data for the 2023-2024 cycle: operating expenditures (<code>oppexp24</code>) and committee master file (<code>cm24</code>), <a href="https://www.fec.gov/data/browse-data/?tab=bulk-data">fec.gov</a>. ZIP-code locations from the open-source <code>zipcodes</code> Python package.</li>
+    <li><b>eforensics:</b> Walter R. Mebane Jr., University of Michigan: the eforensics model and R package (Ferrari, McAlister and Mebane 2018), and "eforensics Analysis of the 2024 President Election in Pennsylvania" (June 2, 2025 version), whose precinct data came from Lilli McGregor and the Election Truth Alliance.</li>
+  </ul>
 </footer>
 
 <div id="tip" class="tip" role="tooltip" hidden></div>

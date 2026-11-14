@@ -22,7 +22,8 @@ UNIT = CONTEST + ["county_fips", "county_name", "jurisdiction_fips", "precinct"]
 VCLASSES = ["dem", "rep", "other", "writein", "over", "under"]
 
 REQUIRED = ["precinct", "office", "party_simplified", "votes", "candidate", "district", "state_po"]
-OPTIONAL = ["mode", "county_name", "county_fips", "jurisdiction_fips", "stage", "special", "writein", "state", "party_detailed", "jurisdiction_name"]
+OPTIONAL = ["mode", "county_name", "county_fips", "jurisdiction_fips", "stage", "special", "writein", "state", "party_detailed", "jurisdiction_name",
+            "registered_voters"]  # registered_voters: not in MEDSL files; added by pa_convert.py (turns on the turnout check)
 
 # Offices elected statewide. Some states report these by congressional district (e.g. Virginia);
 # the district is dropped so each statewide race is ONE contest.
@@ -125,6 +126,9 @@ def read_raw(path, chunksize=250_000, only_states=None):
             chunk["writein"].fillna("FALSE").str.upper().str.strip().eq("TRUE") if "writein" in chunk else False
         )
         out["votes"] = chunk["votes"]
+        out["registered"] = (
+            pd.to_numeric(chunk["registered_voters"], errors="coerce") if "registered_voters" in chunk else np.nan
+        )
         parts.append(out)
 
     if not parts:
@@ -253,6 +257,10 @@ def build_precinct_table(df, cand_tab, stats):
     wide[["v_ed", "v_non"]] = wide[["v_ed", "v_non"]].fillna(0).astype("int64")
 
     p = wide.reset_index()
+    # registered voters (one number per precinct, repeated on every row of the raw file)
+    reg = df.groupby(UNIT, sort=False)["registered"].max().reindex(pd.MultiIndex.from_frame(p[UNIT])).to_numpy()
+    p["registered"] = np.nan_to_num(reg, nan=0.0).round().astype("int64")
+    p["reg_reported"] = np.isfinite(reg) & (reg > 0)
     p["cand_votes"] = p["dem"] + p["rep"] + p["other"] + p["writein"]
     p["two_party"] = p["dem"] + p["rep"]
     p["ballots"] = p["cand_votes"] + p["over"] + p["under"]
@@ -286,6 +294,10 @@ def build_precinct_table(df, cand_tab, stats):
     stats["non_geographic_units"] = int(p["nongeo"].sum())
     stats["zero_vote_units"] = int(p["zero_votes"].sum())
     stats["duplicate_vector_units"] = int(p["dup_vector"].sum())
+    p["over_registered"] = p["reg_reported"] & (p["ballots"] > p["registered"])
+    if p["reg_reported"].any():
+        stats["units_with_registration"] = int(p["reg_reported"].sum())
+        stats["more_votes_than_registered_units"] = int(p["over_registered"].sum())
     for s, n in contests["status"].value_counts().items():
         stats[f"contests_{s}"] = int(n)
     return p, contests

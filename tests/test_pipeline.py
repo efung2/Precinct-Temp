@@ -56,7 +56,7 @@ def test_alabama_sample_is_handled_and_not_over_flagged():
         c = d["contests"]["1"]
         assert c["status"] == "two_party"
         assert c["n_precincts"] == 32
-        assert c["assessed"] == {"share": 0, "under": 0, "mode": 0}
+        assert c["assessed"] == {"share": 0, "under": 0, "mode": 0, "turnout": 0}
         assert c["hb_assessed"]["share"] == 30
         assert c["flagged"]["any"] == 0
         assert c["funnel"]["any"]["persist"] == 0
@@ -229,6 +229,73 @@ def test_missing_columns_fail_clearly():
             assert "missing required column" in str(e)
         else:
             raise AssertionError("expected SystemExit")
+
+
+def test_pa_convert_merges_split_precincts():
+    """A precinct split by a district line: votes sit under one piece, registration under both."""
+    import pa_convert
+
+    def ret(county, prec, office, party, last, votes, name):
+        r = [""] * 37
+        r[0], r[1], r[2], r[3], r[8], r[9], r[11], r[12], r[15] = "2024", "G", county, prec, office, party, last, "X", votes
+        r[21], r[22], r[28], r[29], r[30] = "4", name, "5", "001", str(prec).zfill(4)
+        return r
+
+    def reg(county, prec, dem, rep):
+        r = ["2024", "G", county, prec, 1, "DEM", dem, 2, "REP", rep, 3, "GR", 0, 4, "LIB", 0, 5, "OTH", 0, 6, "", 0] + [0] * 16
+        return r
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        rows = []
+        for prec, name, d, r_ in ((10, "ALPHA", 100, 200), (20, "BETA P 1 (USC 4)", 0, 0), (21, "BETA P 1 (USC 9)", 300, 250),
+                                  (30, "GAMMA", 50, 60)):
+            for office in ("USP", "USS"):
+                rows += [ret(1, prec, office, "DEM", "HARRIS" if office == "USP" else "CASEY", d, name),
+                         ret(1, prec, office, "REP", "TRUMP" if office == "USP" else "MCCORMICK", r_, name)]
+        pd.DataFrame(rows).to_csv(tmp / "ret.txt", header=False, index=False)
+        pd.DataFrame([reg(0, 99999, 0, 0), reg(1, 10, 200, 250), reg(1, 20, 150, 150), reg(1, 21, 200, 200),
+                      reg(1, 30, 80, 90)]).to_csv(tmp / "reg.txt", header=False, index=False)
+        assert pa_convert.main(["--returns", str(tmp / "ret.txt"), "--registration", str(tmp / "reg.txt"), "--out", str(tmp)]) == 0
+        u = pd.read_csv(tmp / "pa-2024-precincts.csv")
+        rep = json.loads((tmp / "pa-2024-build-report.json").read_text())
+        assert len(u) == 3 and rep["merged_split_precincts"] == 1 and rep["source_rows_more_votes_than_registered"] == 1
+        beta = u[u["precinct"] == "BETA P 1"].iloc[0]
+        assert beta["registered"] == 700 and beta["pres_dem"] == 300 and beta["pres_rep"] == 250 and beta["pieces"] == 2
+        assert u["registered"].sum() == 1320 and rep["units_more_votes_than_registered"] == 0
+        m = pd.read_csv(tmp / "pa-2024-president.csv")
+        assert m["votes"].sum() == 960 and set(m["registered_voters"]) == {450, 700, 170}
+
+
+def test_turnout_signal():
+    """With registered voters in the file, a precinct with far lower turnout than its peers is listed."""
+    import numpy as np
+
+    rng = np.random.default_rng(11)
+    rows = []
+    for c in range(4):
+        for i in range(120):
+            reg_n = int(rng.integers(600, 1800))
+            t = 0.25 if (c, i) == (0, 0) else float(np.clip(rng.normal(0.76, 0.03), 0.5, 0.95))
+            v = rng.binomial(reg_n, t)
+            d = rng.binomial(v, float(np.clip(rng.normal(0.48, 0.05), 0.05, 0.95)))
+            for party, n in (("DEMOCRAT", d), ("REPUBLICAN", v - d)):
+                rows.append({"precinct": f"P{c}-{i}", "office": "US PRESIDENT", "party_simplified": party, "party_detailed": party,
+                             "mode": "TOTAL", "votes": n, "county_name": f"C{c}", "county_fips": f"4200{c}",
+                             "jurisdiction_name": f"C{c}", "jurisdiction_fips": f"4200{c}", "candidate": party[:3],
+                             "district": "statewide", "dataverse": "PRESIDENT", "year": 2024, "stage": "GEN",
+                             "state": "PENNSYLVANIA", "special": "FALSE", "writein": "FALSE", "state_po": "PA",
+                             "registered_voters": reg_n})
+    with tempfile.TemporaryDirectory() as tmp:
+        src = Path(tmp) / "pres.csv"
+        pd.DataFrame(rows).to_csv(src, index=False)
+        base = _run(src, Path(tmp) / "out", ["--skip-calibration"])
+        s = _strict_json(base / "summary.json")
+        assert s["has_turnout"] and s["totals"]["hb_assessed"]["turnout"] == 480
+        f = _precinct_frame(base, ["PA"])
+        hit = f[f["precinct"] == "P0-0"].iloc[0]
+        assert hit["turnout_v"] == "P" and "R" in hit["remain"] and abs(hit["turnout"] - 0.25) < 0.06
+        assert (f["turnout_v"] == "P").sum() <= 2
 
 
 def test_eforensics_smoke():

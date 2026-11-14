@@ -21,8 +21,9 @@ import fdr
 import hierarchical as hb
 from metrics import metric_inputs
 
-SIGNALS = ("share", "under", "mode", "cross")
-LETTER = {"share": "S", "under": "U", "mode": "M", "cross": "X"}
+METRICS = ("share", "under", "mode", "turnout")
+SIGNALS = METRICS + ("cross",)
+LETTER = {"share": "S", "under": "U", "mode": "M", "turnout": "R", "cross": "X"}
 STAGES = ("screened", "after_T", "after_E", "after_C", "after_L")
 
 
@@ -161,7 +162,7 @@ def run(p, fits, z_flag, cross=None, rng=None, log=print):
     gid_d = fits["share"]["gid_d"]
     has_cross = cross is not None and "cross_z" in p
     results = {}
-    for m in ("share", "under", "mode"):
+    for m in METRICS:
         d = inputs[m]
         cz = p["cross_z"].to_numpy() if (has_cross and m == "share") else None
         rng = np.random.default_rng(config.SEED) if rng is None else rng
@@ -179,7 +180,7 @@ def run(p, fits, z_flag, cross=None, rng=None, log=print):
         r["mask"], r["num"], r["den"] = d["mask"], d["num"], d["den"]
         results[m] = r
         fn = funnel(r["v"], has_cross and m == "share")
-        log(f"    {m:6s}: hierarchical model assessed {int(np.isfinite(r['p']).sum()):,}; "
+        log(f"    {m:7s}: hierarchical model assessed {int(np.isfinite(r['p']).sum()):,}; "
             f"screened {fn['screened']:,} -> persist {fn['persist']:,}  "
             f"[tail df: small {dfs['small']:g}, large {dfs['large']:g}]")
 

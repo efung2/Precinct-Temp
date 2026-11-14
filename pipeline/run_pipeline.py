@@ -27,6 +27,54 @@ import export  # noqa: E402
 import metrics  # noqa: E402
 
 
+def analyse(input_path, companion=None, z_flag=None, seed=None, chunksize=250_000, only=None, log=print):
+    """Steps 1-3: read, clean, score and run every check. Returns the precinct table and all fits.
+
+    Used by main() below and by pa_study.py, so both see exactly the same verdicts."""
+    z_flag = config.Z_FLAG if z_flag is None else z_flag
+    seed = config.SEED if seed is None else seed
+    src = Path(input_path)
+    if not src.exists():
+        raise SystemExit(f"Input file not found: {src}")
+
+    log(f"1/4 reading {src.name} ({src.stat().st_size / 1e6:.0f} MB)")
+    df, stats = clean.read_raw(src, chunksize=chunksize, only_states=only)
+    log(f"    {stats['raw_rows']:,} raw rows -> {stats['rows_kept']:,} kept "
+        f"({stats['blank_rows']:,} blank padding rows dropped)")
+    state_names = df.groupby("state_po")["state"].first().to_dict()
+
+    log("2/4 cleaning and building the precinct table")
+    df, cand_tab = clean.classify(df, stats)
+    p, contests = clean.build_precinct_table(df, cand_tab, stats)
+    del df
+    log(f"    {stats['precincts']:,} precincts in {stats['contests']:,} contests; "
+        f"{stats.get('contests_two_party', 0):,} are two-party contests that can be analysed")
+
+    log("3/4 scoring precincts against their peers")
+    p, fits = metrics.analyze(p, z_flag=z_flag)
+    for m, f in fits.items():
+        n_assessed = int((~np.isnan(f["z"])).sum())
+        n_flag = int(metrics.is_flagged(f["z"], f["support"], z_flag).sum())
+        log(f"    peer z  {m:7s}: {n_assessed:,} assessed, {n_flag:,} flagged at |z| >= {z_flag:g}")
+
+    cross = None
+    cross_info = None
+    if companion:
+        comp_path = Path(companion)
+        if not comp_path.exists():
+            raise SystemExit(f"Companion file not found: {comp_path}")
+        log(f"    reading companion race file {comp_path.name}")
+        comp, _ = crossrace.load_companion(comp_path, log=log)
+        p, cross_info, cross = crossrace.attach(p, comp, log=log)
+        cross_info["source_file"] = comp_path.name
+        del comp
+
+    log("    hierarchical model, multiple-testing control and verdicts")
+    p, chain = checks.run(p, fits, z_flag, cross=cross, rng=np.random.default_rng(seed + 1), log=log)
+    return {"p": p, "contests": contests, "fits": fits, "cross": cross, "cross_info": cross_info, "chain": chain,
+            "stats": stats, "state_names": state_names, "src": src}
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input", required=True, help="path to the raw MEDSL precinct CSV")
@@ -52,44 +100,9 @@ def main(argv=None):
     def log(msg):
         print(f"[{time.time() - t0:6.1f}s] {msg}", flush=True)
 
-    src = Path(args.input)
-    if not src.exists():
-        raise SystemExit(f"Input file not found: {src}")
-
-    log(f"1/4 reading {src.name} ({src.stat().st_size / 1e6:.0f} MB)")
-    df, stats = clean.read_raw(src, chunksize=args.chunksize, only_states=only)
-    log(f"    {stats['raw_rows']:,} raw rows -> {stats['rows_kept']:,} kept "
-        f"({stats['blank_rows']:,} blank padding rows dropped)")
-    state_names = df.groupby("state_po")["state"].first().to_dict()
-
-    log("2/4 cleaning and building the precinct table")
-    df, cand_tab = clean.classify(df, stats)
-    p, contests = clean.build_precinct_table(df, cand_tab, stats)
-    del df
-    log(f"    {stats['precincts']:,} precincts in {stats['contests']:,} contests; "
-        f"{stats.get('contests_two_party', 0):,} are two-party contests that can be analysed")
-
-    log("3/4 scoring precincts against their peers")
-    p, fits = metrics.analyze(p, z_flag=args.z_flag)
-    for m, f in fits.items():
-        n_assessed = int((~np.isnan(f["z"])).sum())
-        n_flag = int(metrics.is_flagged(f["z"], f["support"], args.z_flag).sum())
-        log(f"    peer z  {m:6s}: {n_assessed:,} assessed, {n_flag:,} flagged at |z| >= {args.z_flag:g}")
-
-    cross = None
-    cross_info = None
-    if args.companion:
-        comp_path = Path(args.companion)
-        if not comp_path.exists():
-            raise SystemExit(f"Companion file not found: {comp_path}")
-        log(f"    reading companion race file {comp_path.name}")
-        comp, _ = crossrace.load_companion(comp_path, log=log)
-        p, cross_info, cross = crossrace.attach(p, comp, log=log)
-        cross_info["source_file"] = comp_path.name
-        del comp
-
-    log("    hierarchical model, multiple-testing control and verdicts")
-    p, chain = checks.run(p, fits, args.z_flag, cross=cross, rng=np.random.default_rng(args.seed + 1), log=log)
+    r = analyse(args.input, args.companion, args.z_flag, args.seed, chunksize=args.chunksize, only=only, log=log)
+    p, contests, fits, cross, cross_info, chain, stats, state_names, src = (
+        r[k] for k in ("p", "contests", "fits", "cross", "cross_info", "chain", "stats", "state_names", "src"))
 
     calib = None
     if not args.skip_calibration:

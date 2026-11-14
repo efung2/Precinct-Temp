@@ -35,6 +35,15 @@ def _simulate_counts(rng, den, center, tau2):
     return rng.binomial(den.astype("int64"), p)
 
 
+def _pick_groups(gid_c, gid_d):
+    """Groups from which ONE precinct each gets an injected shift: races, or counties when the
+    dataset has too few races (a single statewide race would otherwise give one trial per run)."""
+    return gid_d if len(np.unique(gid_d)) >= MIN_INJECTION_GROUPS else gid_c
+
+
+MIN_INJECTION_GROUPS = 30
+
+
 def _subset(fit, state_idx):
     keep = np.flatnonzero(~np.isnan(fit["z"]))
     return {
@@ -111,8 +120,9 @@ def run_calibration(fits, states, rng, log=print):
                 k = _simulate_counts(rng, s["den"], s["center"], s["tau2"])
                 # one random precinct per contest gets the injected shift
                 r = rng.random(n)
-                order = np.lexsort((r, s["gid_d"]))
-                first = np.r_[True, s["gid_d"][order][1:] != s["gid_d"][order][:-1]]
+                pg = _pick_groups(s["gid_c"], s["gid_d"])
+                order = np.lexsort((r, pg))
+                first = np.r_[True, pg[order][1:] != pg[order][:-1]]
                 pick = order[first]
                 sign = rng.choice([-1, 1], size=len(pick))
                 moved = np.rint(shift * s["den"][pick]).astype("int64") * sign
@@ -155,14 +165,17 @@ def run_chain_calibration(p, fits, chain, cross, rng, z_flag, reps=None, log=pri
     import checks
     from metrics import score_metric
 
-    reps = config.CHAIN_REPS if reps is None else reps
+    if reps is None:
+        # more repetitions for small datasets (cheap there), never fewer than CHAIN_REPS
+        n_assessed = int((chain["share"]["fit"]["level"] > 0).sum())
+        reps = int(np.clip(np.ceil(config.CHAIN_TARGET_DRAWS / max(n_assessed, 1)), config.CHAIN_REPS, config.CHAIN_MAX_REPS))
     out = {"reps": reps, "signals": {}, "power": None,
            "note": "Clean elections are simulated from the fitted hierarchical model, so this "
                    "checks that each step is calibrated; it cannot show that real precincts follow the model."}
     gid_c = fits["share"]["gid_c"]
     gid_d = fits["share"]["gid_d"]
 
-    for m in ("share", "under", "mode"):
+    for m in checks.METRICS:
         r = chain[m]
         f = r["fit"]
         rows = np.flatnonzero(f["level"] > 0)
@@ -231,14 +244,19 @@ def run_chain_calibration(p, fits, chain, cross, rng, z_flag, reps=None, log=pri
                                        "expected_persist": round(per / reps, 2)}
             log(f"    full-chain null [cross]: screened {scr / reps:.1f}, persisted {per / reps:.2f}")
 
-    # ---- power: inject a vote-share shift into one precinct per race, follow it through the funnel
-    r = chain["share"]
-    f = r["fit"]
-    rows = np.flatnonzero(f["level"] > 0)
-    if len(rows) >= config.HB_MIN_DISTRICT:
+    # ---- power: inject a shift into one precinct per race (or county), follow it through the funnel
+    per_county = len(np.unique(gid_d)) < MIN_INJECTION_GROUPS
+    where = "county" if per_county else "race"
+    for m, key, what in (("share", "power", "vote share"), ("turnout", "power_turnout", "turnout")):
+        r = chain[m]
+        f = r["fit"]
+        rows = np.flatnonzero(f["level"] > 0)
+        if len(rows) < config.HB_MIN_DISTRICT:
+            continue
         den = r["den"].astype(float)
         mask = np.zeros(len(den), bool)
         mask[rows] = True
+        pg = gid_c if per_county else gid_d
         stages = ("screened", "after_T", "after_E", "after_C")
         hits = {s: np.zeros(len(config.SHIFTS)) for s in stages}
         tot = np.zeros(len(config.SHIFTS))
@@ -248,14 +266,15 @@ def run_chain_calibration(p, fits, chain, cross, rng, z_flag, reps=None, log=pri
                 k = np.zeros(len(den))
                 k[rows] = hb.simulate(rng, den[rows], f["mu"][rows], f["v"][rows])
                 rr = rng.random(len(rows))
-                order = rows[np.lexsort((rr, gid_d[rows]))]
-                first = np.r_[True, gid_d[order][1:] != gid_d[order][:-1]]
+                order = rows[np.lexsort((rr, pg[rows]))]
+                first = np.r_[True, pg[order][1:] != pg[order][:-1]]
                 pick = order[first]
                 pick = pick[den[pick] >= 100]
+                # turnout can only be pushed up or down within what is possible; share moves either way
                 sign = rng.choice([-1, 1], size=len(pick))
                 k[pick] = np.clip(k[pick] + np.rint(shift * den[pick]) * sign, 0, den[pick])
-                peer = score_metric(k, den, mask & (den >= config.MIN_DEN), gid_c, gid_d, tau_min=config.TAU_MIN["share"])
-                res = checks.score_metric_chain(k, den, mask, gid_c, gid_d, config.TAU_MIN["share"],
+                peer = score_metric(k, den, mask & (den >= config.MIN_DEN), gid_c, gid_d, tau_min=config.TAU_MIN[m])
+                res = checks.score_metric_chain(k, den, mask, gid_c, gid_d, config.TAU_MIN[m],
                                                 peer["z"], peer["support"], z_flag, None, dfs=r.get("dfs"))
                 v = res["v"][pick]
                 tot[si] += len(pick)
@@ -263,14 +282,18 @@ def run_chain_calibration(p, fits, chain, cross, rng, z_flag, reps=None, log=pri
                 hits["after_T"][si] += (~np.isin(v, ["", "T"])).sum()
                 hits["after_E"][si] += (~np.isin(v, ["", "T", "E"])).sum()
                 hits["after_C"][si] += (v == "P").sum()
-        out["power"] = {
+        out[key] = {
+            "metric": m,
             "shifts": list(config.SHIFTS),
             "stages": list(stages),
             "rate": {s: [float(h / t) if t else None for h, t in zip(hits[s], tot)] for s in stages},
             "trials": [int(t) for t in tot],
-            "note": "Shift applied to one precinct (100+ votes) per race, in one race only. The cross-race "
-                    "check is not simulated: it only removes precincts that look the same in BOTH races, "
-                    "so a single-race shift would not be removed by it.",
+            "per": where,
+            "note": f"Shift in {what} applied to one precinct (100+ {'registered voters' if m == 'turnout' else 'votes'}) "
+                    f"per {where}, up or down at random" + (", in one race only. The cross-race check is not simulated: "
+                    "it only removes precincts that look the same in BOTH races, so a single-race shift would not be "
+                    "removed by it." if m == "share" else ". A turnout shift of 10 points means ballots equal to 10% of "
+                    "registered voters were added or removed."),
         }
-        log(f"    full-chain power: {len(config.SHIFTS)} shifts x {preps} reps")
+        log(f"    full-chain power [{m}]: {len(config.SHIFTS)} shifts x {preps} reps, one precinct per {where}")
     return out
